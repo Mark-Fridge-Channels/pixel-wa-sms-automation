@@ -1,0 +1,26 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+node_modules/
+.idea/
+.vscode/
+
+# orchestrator runtime
+channel-orchestrator/data/
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc
+.venv/
+venv/
+
+# Android / companion build artifacts
+**/local.properties
+**/.gradle/
+**/build/
+**/*.apk
+**/*.aab
+**/captures/
+android/.cxx/
+wa-companion/.cxx/

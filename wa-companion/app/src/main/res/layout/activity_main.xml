@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Server base URL"
+        android:textStyle="bold" />
+
+    <EditText
+        android:id="@+id/serverUrl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="http://192.168.x.x:8787"
+        android:inputType="textUri" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="API token (optional)"
+        android:textStyle="bold" />
+
+    <EditText
+        android:id="@+id/apiToken"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Bearer token value only"
+        android:inputType="textPassword" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/masterSwitch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Automation ON" />
+
+    <Button
+        android:id="@+id/saveBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Save &amp; apply" />
+
+    <Button
+        android:id="@+id/openAccessibility"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Open Accessibility settings" />
+
+    <Button
+        android:id="@+id/openNotifications"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Open Notification access" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Status: idle" />
+</LinearLayout>
