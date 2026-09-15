@@ -24,3 +24,6 @@ venv/
 **/captures/
 android/.cxx/
 wa-companion/.cxx/
+
+# Server-local secrets (never commit)
+channel-orchestrator/deploy/smsgate/config.yml
