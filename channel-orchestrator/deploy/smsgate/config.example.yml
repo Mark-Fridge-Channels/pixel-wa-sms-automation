@@ -1,0 +1,24 @@
+# SMS Gate Private Server — EXAMPLE (safe to commit)
+# On the server:
+#   cp deploy/smsgate/config.example.yml deploy/smsgate/config.yml
+#   edit config.yml (private_token + DB password)
+# config.yml is gitignored — git pull will NOT overwrite it.
+#
+# Phone Cloud Server:
+#   API URL: https://smsgate.fcconnect.co/api/mobile/v1
+#   Private Token: same as gateway.private_token
+
+gateway:
+  mode: private
+  private_token: "REPLACE_WITH_LONG_RANDOM_TOKEN"
+
+http:
+  listen: 0.0.0.0:3000
+
+database:
+  host: smsgate-db
+  port: 3306
+  user: sms
+  password: "REPLACE_WITH_SMSGATE_DB_PASSWORD"
+  database: sms
+  timezone: UTC
