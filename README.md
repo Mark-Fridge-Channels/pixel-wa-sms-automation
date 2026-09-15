@@ -12,6 +12,7 @@
 
 | 文档 | 说明 |
 |---|---|
+| [docs/DEPLOY_SERVER.md](docs/DEPLOY_SERVER.md) | **服务器部署（Caddy / orch.fcconnect.co / Email+WA+SMS）** |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | **完整架构图 + 每天如何执行（三通道）** |
 | [docs/PLAN.md](docs/PLAN.md) | 主方案（含服务器部署与断线 §2.1） |
 | [docs/PLAN_WHATSAPP.md](docs/PLAN_WHATSAPP.md) | WhatsApp 本机 Companion 方案 |
