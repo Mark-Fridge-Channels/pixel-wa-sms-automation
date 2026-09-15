@@ -308,11 +308,30 @@ def poll_gmail_inbound(
     write_notion: bool = True,
 ) -> list[dict[str, Any]]:
     from .gmail_client import GmailClient
+    from .inbound_dedupe import seen_or_mark
 
     gmail = gmail or GmailClient()
     email_cache = cache or OutboundCache(channel="EMAIL")
     results = []
     for msg in gmail.poll_new_inbound():
+        mid = str(msg.get("gmail_message_id") or msg.get("message_id") or "")
+        if seen_or_mark(
+            "EMAIL",
+            mid or None,
+            body=str(msg.get("body") or ""),
+            sender=str(msg.get("sender") or ""),
+        ):
+            log.info("skip duplicate gmail inbound id=%s", mid)
+            results.append(
+                {
+                    "ok": True,
+                    "matched": False,
+                    "skipped": True,
+                    "reason": "duplicate_inbound",
+                    "gmail_message_id": mid or None,
+                }
+            )
+            continue
         results.append(
             handle_inbound_email(
                 msg,
