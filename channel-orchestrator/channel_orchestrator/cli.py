@@ -4,11 +4,9 @@ import argparse
 import json
 import logging
 import time
-import uuid
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import httpx
 import uvicorn
 
 from .config import settings
@@ -24,20 +22,12 @@ log = logging.getLogger("cli")
 
 def register_webhook(url: str, event: str = "sms:received") -> dict:
     client = SmsGatewayClient()
-    payload = {"id": str(uuid.uuid4()), "url": url, "event": event}
-    with httpx.Client(timeout=30.0, auth=client.auth) as http:
-        r = http.post(f"{client.base}/webhooks", json=payload)
-        print("register status", r.status_code, r.text[:500])
-        r.raise_for_status()
-        return r.json() if r.content else {"status_code": r.status_code}
+    return client.register_webhook(url, event=event)
 
 
 def list_webhooks() -> list:
     client = SmsGatewayClient()
-    with httpx.Client(timeout=30.0, auth=client.auth) as http:
-        r = http.get(f"{client.base}/webhooks")
-        r.raise_for_status()
-        return r.json()
+    return client.list_webhooks()
 
 
 def main() -> None:

@@ -5,19 +5,26 @@ import json
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 from .config import settings
 
 
 class SmsGatewayClient:
-    """Client for SMS Gateway for Android (capcom6) style Basic-auth REST API.
+    """Client for SMS Gateway for Android (capcom6) REST API.
 
-    Uses urllib instead of httpx: this device's local SMS Gateway often returns
-    HTTP 502 to httpx (Accept-Encoding / keep-alive quirks over adb forward).
+    Modes (SMS_GATEWAY_MODE):
+    - local:   phone Local Server  → POST {base}/message
+    - private: self-hosted server  → POST {base}/api/3rdparty/v1/messages
+    - cloud:   api.sms-gate.app    → POST {base}/3rdparty/v1/messages
+
+    Uses urllib instead of httpx: Local Server over adb forward often returns
+    HTTP 502 to httpx (Accept-Encoding / keep-alive quirks).
     """
 
     def __init__(self) -> None:
         self.base = settings.sms_gateway_url.rstrip("/")
+        self.mode = (settings.sms_gateway_mode or "local").strip().lower()
         self.auth = None
         if settings.sms_gateway_user:
             self.auth = (settings.sms_gateway_user, settings.sms_gateway_password)
@@ -27,6 +34,23 @@ class SmsGatewayClient:
             return {}
         token = base64.b64encode(f"{self.auth[0]}:{self.auth[1]}".encode()).decode()
         return {"Authorization": f"Basic {token}"}
+
+    def _api_prefix(self) -> str:
+        if self.mode == "private":
+            return "/api/3rdparty/v1"
+        if self.mode == "cloud":
+            return "/3rdparty/v1"
+        return ""
+
+    def _send_path(self) -> str:
+        if self.mode in {"private", "cloud"}:
+            return f"{self._api_prefix()}/messages"
+        return "/message"
+
+    def _webhooks_path(self) -> str:
+        if self.mode in {"private", "cloud"}:
+            return f"{self._api_prefix()}/webhooks"
+        return "/webhooks"
 
     def _request(
         self,
@@ -56,22 +80,30 @@ class SmsGatewayClient:
 
     def ping(self) -> dict[str, Any]:
         last = "unreachable"
-        for path in ("/health", "/", "/api/v1/health"):
+        candidates = ["/health", "/", "/api/v1/health"]
+        if self.mode == "private":
+            candidates = ["/health", "/api/3rdparty/v1/health", "/"]
+        elif self.mode == "cloud":
+            candidates = ["/health", "/3rdparty/v1/health", "/"]
+        for path in candidates:
             try:
                 status, body = self._request("GET", path, timeout=15.0)
                 if status < 500:
-                    return {"ok": True, "path": path, "status": status, "body": body[:500]}
+                    return {
+                        "ok": True,
+                        "mode": self.mode,
+                        "path": path,
+                        "status": status,
+                        "body": body[:500],
+                        "host": urlparse(self.base).netloc,
+                    }
                 last = f"{path}:{status}"
             except Exception as e:  # noqa: BLE001
                 last = str(e)
-        return {"ok": False, "error": last}
+        return {"ok": False, "mode": self.mode, "error": last}
 
     def send_sms(self, phone_numbers: list[str], message: str, sim_number: int | None = None) -> dict[str, Any]:
-        """
-        POST /message
-        Docs: https://docs.sms-gate.app/
-        On this Pixel, Saily #2 is simNumber=2.
-        """
+        """Send SMS. Local uses /message; private/cloud use .../messages."""
         if sim_number is None:
             sim_number = settings.sms_sim_number
         payload: dict[str, Any] = {
@@ -80,9 +112,34 @@ class SmsGatewayClient:
         }
         if sim_number is not None:
             payload["simNumber"] = sim_number
-        status, body = self._request("POST", "/message", payload=payload, timeout=60.0)
+        path = self._send_path()
+        status, body = self._request("POST", path, payload=payload, timeout=60.0)
         if status >= 400:
-            raise RuntimeError(f"SMS Gateway POST /message -> {status}: {body[:500]}")
+            raise RuntimeError(f"SMS Gateway POST {path} -> {status}: {body[:500]}")
         if body.strip():
             return json.loads(body)
         return {"status_code": status}
+
+    def list_webhooks(self) -> Any:
+        status, body = self._request("GET", self._webhooks_path(), timeout=30.0)
+        if status >= 400:
+            raise RuntimeError(f"SMS Gateway GET webhooks -> {status}: {body[:500]}")
+        return json.loads(body) if body.strip() else []
+
+    def register_webhook(self, url: str, event: str = "sms:received") -> Any:
+        payload = {"id": None, "url": url, "event": event}
+        # Local API historically accepted without id; private may require fields.
+        status, body = self._request(
+            "POST",
+            self._webhooks_path(),
+            payload={"url": url, "event": event},
+            timeout=30.0,
+        )
+        if status >= 400:
+            # retry legacy shape
+            status, body = self._request(
+                "POST", self._webhooks_path(), payload=payload, timeout=30.0
+            )
+        if status >= 400:
+            raise RuntimeError(f"SMS Gateway POST webhooks -> {status}: {body[:500]}")
+        return json.loads(body) if body.strip() else {"status_code": status}

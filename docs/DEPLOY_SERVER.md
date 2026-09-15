@@ -1,139 +1,126 @@
-# 服务器部署（Caddy + orch.fcconnect.co）
+# 服务器 Docker 部署（orch + SMS Gate Private）
 
-目标：`Email + WhatsApp + SMS` 均由服务器上的 `channel-orchestrator` 编排；手机只负责 SMS Gateway / WA Companion 执行层。
+目标：`Email + WhatsApp + SMS` 全部经 `fcconnect.co` 域名运行。
 
-## 域名 / Caddy
+| 子域 | 用途 | 反代到 |
+|------|------|--------|
+| `orch.fcconnect.co` | channel-orchestrator（webhook / WA jobs / health） | `127.0.0.1:8787` |
+| `smsgate.fcconnect.co` | **自建 SMS Gate Private Server**（手机 Cloud 连这里） | `127.0.0.1:3000` |
+| `mail.fcconnect.co` | 已有 | `127.0.0.1:3737` |
 
-GoDaddy DNS：
+> 可以。官方支持 Private Server；手机 App 填你的 HTTPS 域名即可，消息内容留在你自己的服务器（推送通知仍可走官方 FCM 通道）。
 
-- 主机：`orch`
-- 类型：`A`
-- 值：服务器公网 IP
+## 1. DNS（GoDaddy）
 
-`/etc/caddy/Caddyfile`：
+| 主机 | 类型 | 值 |
+|------|------|-----|
+| `orch` | A | 服务器公网 IP |
+| `smsgate` | A | 同上 |
 
-```caddy
-mail.fcconnect.co {
-  reverse_proxy 127.0.0.1:3737
-}
+## 2. Caddy
 
-orch.fcconnect.co {
-  encode gzip
-  reverse_proxy 127.0.0.1:8787
-}
-```
+把仓库里 `channel-orchestrator/deploy/Caddyfile.snippet` 合并进 `/etc/caddy/Caddyfile`，然后：
 
 ```bash
 sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
-## 代码目录
+## 3. 准备配置
 
 ```bash
-sudo mkdir -p /data
-sudo chown "$USER":"$USER" /data
-cd /data
-git clone <本仓库 URL> pixel-wa-sms-automation
-cd pixel-wa-sms-automation/channel-orchestrator
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cd /data/pixel-wa-sms-automation
+git pull
+
+cd channel-orchestrator
 cp .env.example .env
-# 编辑 .env（见下）
+# 编辑 .env：NOTION / GMAIL / REPLY / WA_API_TOKEN / SMS_GATEWAY_*
+
+# 编辑 SMS Gate 私有云配置（private_token + DB 密码必须改）
+nano deploy/smsgate/config.yml
+# gateway.private_token  ← 手机里填同一个
+# database.password      ← 与 .env 里 SMSGATE_DB_PASSWORD 一致
 ```
 
-## SMS 怎么跑（重要）
-
-手机上的 **SMS Gateway App 本身就是服务**（Local / Cloud 开关）。
-
-| 模式 | 服务器如何发短信 | 入站 webhook |
-|------|------------------|--------------|
-| **Cloud（推荐 7×24）** | `SMS_GATEWAY_URL=https://api.sms-gate.app` + Cloud 账号 | 在 App/Dashboard 登记 `https://orch.fcconnect.co/webhook/sms` |
-| Local + USB/同网 | `http://手机局域网:8080` | 手机要能访问公网 webhook（或内网穿透） |
-| Local + Tailscale | `http://100.x.x.x:8080` | webhook 仍用 `https://orch.fcconnect.co/webhook/sms` |
-
-**生产推荐 Cloud**：服务器不依赖家里 Wi‑Fi/USB；手机开着 Cloud Server 即可收发。
-
-WhatsApp：Companion 把 Server URL 设为 `https://orch.fcconnect.co`，填 `WA_API_TOKEN`。
-
-## `.env`（服务器）
+`.env` 关键项示例：
 
 ```bash
 WEBHOOK_BASE=https://orch.fcconnect.co
 WA_API_TOKEN=<强随机>
+
+SMS_GATEWAY_MODE=private
+SMS_GATEWAY_URL=https://smsgate.fcconnect.co
+# 手机 Cloud Online 后 App 会显示 username/password，再填到下面两行：
+SMS_GATEWAY_USER=
+SMS_GATEWAY_PASSWORD=
+
 REPLY_WEBHOOK_URL=https://followup-portal.fridgechannels.com/api/replies
-REPLY_WEBHOOK_TOKEN=<生产 token>
+REPLY_WEBHOOK_TOKEN=...
 NOTION_TOKEN=...
-GMAIL_CLIENT_ID=...
-GMAIL_CLIENT_SECRET=...
-GMAIL_REFRESH_TOKEN=...
-GMAIL_USER=mark@fridgechannels.com
-
-# SMS Cloud 示例（以 App 显示为准）
-SMS_GATEWAY_URL=https://api.sms-gate.app
-SMS_GATEWAY_USER=...
-SMS_GATEWAY_PASSWORD=...
-SMS_SIM_NUMBER=2
-SAILY_PHONE_E164=+18207863604
+GMAIL_*=...
 ```
 
-## systemd（两进程）
-
-### 1) API / webhook / WA jobs
-
-`/etc/systemd/system/channel-orch-serve.service`：
-
-```ini
-[Unit]
-Description=Channel Orchestrator HTTP (webhook + WA jobs)
-After=network.target
-
-[Service]
-Type=simple
-User=YOUR_USER
-WorkingDirectory=/data/pixel-wa-sms-automation/channel-orchestrator
-EnvironmentFile=/data/pixel-wa-sms-automation/channel-orchestrator/.env
-ExecStart=/data/pixel-wa-sms-automation/channel-orchestrator/.venv/bin/python -m channel_orchestrator.cli serve --host 127.0.0.1 --port 8787
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 2) 调度（Email/SMS/WA 出站 + Gmail poll）
-
-`/etc/systemd/system/channel-orch-scheduler.service`：
-
-```ini
-[Unit]
-Description=Channel Orchestrator Scheduler
-After=network.target channel-orch-serve.service
-
-[Service]
-Type=simple
-User=YOUR_USER
-WorkingDirectory=/data/pixel-wa-sms-automation/channel-orchestrator
-EnvironmentFile=/data/pixel-wa-sms-automation/channel-orchestrator/.env
-ExecStart=/data/pixel-wa-sms-automation/channel-orchestrator/.venv/bin/python -m channel_orchestrator.cli run-scheduler --channel all
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+## 4. 启动 Docker
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now channel-orch-serve channel-orch-scheduler
-curl -sS https://orch.fcconnect.co/health
+cd /data/pixel-wa-sms-automation/channel-orchestrator
+docker compose up -d --build
+docker compose ps
+docker compose logs -f --tail=80 orch-serve smsgate
 ```
 
-## 验收清单
+验收：
 
-1. `https://orch.fcconnect.co/health` → ok  
-2. Companion heartbeat 出现在 health  
-3. SMS Gateway Cloud ON，webhook 指向 `/webhook/sms`  
-4. `run-once --channel Email|SMS|WhatsApp` 各测一条（测试联系人）  
-5. 三渠道回复能匹配并 `POST /api/replies`
+```bash
+curl -sS http://127.0.0.1:8787/health
+curl -sS https://orch.fcconnect.co/health
+curl -sS https://smsgate.fcconnect.co/health
+```
+
+## 5. 手机（第 4 步）
+
+### SMS Gateway App
+1. Settings → Cloud Server  
+2. API URL：`https://smsgate.fcconnect.co/api/mobile/v1`  
+3. Private Token：与 `deploy/smsgate/config.yml` 里一致  
+4. 打开 Cloud Server → Online  
+5. 记下生成的 Username / Password → 写入服务器 `.env` 的 `SMS_GATEWAY_USER/PASSWORD`  
+6. 注册入站 webhook（在服务器上）：
+
+```bash
+docker compose exec orch-serve \
+  python -m channel_orchestrator.cli webhook-register \
+  --url https://orch.fcconnect.co/webhook/sms
+```
+
+### WA Companion
+- Server URL：`https://orch.fcconnect.co`  
+- API token：与 `WA_API_TOKEN` 一致  
+- 无障碍 + 通知权限保持开启  
+
+改完 `.env` 后：
+
+```bash
+docker compose up -d --force-recreate orch-serve orch-scheduler
+```
+
+## 6. 常用命令
+
+```bash
+docker compose logs -f orch-scheduler
+docker compose exec orch-serve python -m channel_orchestrator.cli ping
+docker compose exec orch-serve python -m channel_orchestrator.cli run-once --channel Email --force
+docker compose restart orch-serve orch-scheduler
+```
+
+## 架构关系
+
+```
+Notion / Portal / Gmail
+        ↑
+ channel-orchestrator (orch.fcconnect.co)
+   ├─ SMS 出站 → smsgate.fcconnect.co → 推送到手机 Gateway App → 真发短信
+   ├─ SMS 入站 ← 手机 webhook → orch /webhook/sms
+   ├─ WA 出站  → wa_jobs ← Companion 轮询
+   └─ Email    → Gmail API
+```

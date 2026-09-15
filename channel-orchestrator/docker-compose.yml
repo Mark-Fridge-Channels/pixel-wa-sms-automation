@@ -1,0 +1,101 @@
+# Docker Compose: channel-orchestrator + SMS Gate Private Server
+#
+# Host Caddy (already on the VPS) should reverse_proxy:
+#   orch.fcconnect.co     -> 127.0.0.1:8787
+#   smsgate.fcconnect.co  -> 127.0.0.1:3000
+#
+# Copy .env.example -> .env and fill secrets before `docker compose up -d`.
+
+services:
+  orch-serve:
+    build: .
+    container_name: channel-orch-serve
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      WEBHOOK_BASE: https://orch.fcconnect.co
+    volumes:
+      - orch_data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
+    command: ["python", "-m", "channel_orchestrator.cli", "serve", "--host", "0.0.0.0", "--port", "8787"]
+    depends_on:
+      - smsgate
+    networks:
+      - orch_net
+
+  orch-scheduler:
+    build: .
+    container_name: channel-orch-scheduler
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      WEBHOOK_BASE: https://orch.fcconnect.co
+    volumes:
+      - orch_data:/data
+    command: ["python", "-m", "channel_orchestrator.cli", "run-scheduler", "--channel", "all"]
+    depends_on:
+      - orch-serve
+      - smsgate
+    networks:
+      - orch_net
+
+  smsgate-db:
+    image: mariadb:11
+    container_name: smsgate-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SMSGATE_DB_ROOT_PASSWORD:-change-me-root}
+      MYSQL_DATABASE: sms
+      MYSQL_USER: sms
+      MYSQL_PASSWORD: ${SMSGATE_DB_PASSWORD:-change-me-sms}
+    volumes:
+      - smsgate_db:/var/lib/mysql
+    networks:
+      - orch_net
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  smsgate:
+    image: ghcr.io/android-sms-gateway/server:latest
+    container_name: smsgate
+    restart: unless-stopped
+    depends_on:
+      smsgate-db:
+        condition: service_healthy
+    environment:
+      CONFIG_PATH: /app/config.yml
+    volumes:
+      - ./deploy/smsgate/config.yml:/app/config.yml:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - orch_net
+
+  smsgate-worker:
+    image: ghcr.io/android-sms-gateway/server:latest
+    container_name: smsgate-worker
+    restart: unless-stopped
+    depends_on:
+      smsgate-db:
+        condition: service_healthy
+    environment:
+      CONFIG_PATH: /app/config.yml
+    volumes:
+      - ./deploy/smsgate/config.yml:/app/config.yml:ro
+    command: ["/app/app", "worker"]
+    networks:
+      - orch_net
+
+volumes:
+  orch_data:
+  smsgate_db:
+
+networks:
+  orch_net:
+    driver: bridge

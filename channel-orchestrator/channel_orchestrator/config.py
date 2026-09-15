@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     sms_gateway_url: str = "http://127.0.0.1:8080"
     sms_gateway_user: str = ""
     sms_gateway_password: str = ""
+    # local | private | cloud  (API path differs; see gateway.SmsGatewayClient)
+    sms_gateway_mode: str = "local"
     sms_sim_number: int = 2
 
     webhook_base: str = "http://127.0.0.1:8787"

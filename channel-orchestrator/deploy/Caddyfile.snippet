@@ -1,0 +1,19 @@
+# Caddy snippets for host /etc/caddy/Caddyfile
+#
+# DNS (GoDaddy):
+#   orch     A  <server-ip>
+#   smsgate  A  <server-ip>
+
+mail.fcconnect.co {
+	reverse_proxy 127.0.0.1:3737
+}
+
+orch.fcconnect.co {
+	encode gzip
+	reverse_proxy 127.0.0.1:8787
+}
+
+smsgate.fcconnect.co {
+	encode gzip
+	reverse_proxy 127.0.0.1:3000
+}
