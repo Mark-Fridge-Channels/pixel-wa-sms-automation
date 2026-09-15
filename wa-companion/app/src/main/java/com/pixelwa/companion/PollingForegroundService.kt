@@ -79,8 +79,11 @@ class PollingForegroundService : Service() {
             if (ok) {
                 dwellAndScrapeReplies(job.phone, job.text)
             }
+            // Always leave the open chat so the phone is not stuck on WhatsApp compose.
+            SendAccessibilityService.leaveChatToList()
         } catch (e: Exception) {
             Log.e(TAG, "poll failed", e)
+            SendAccessibilityService.leaveChatToList()
         } finally {
             busy.set(false)
         }
@@ -205,7 +208,8 @@ class PollingForegroundService : Service() {
         private const val CHANNEL_ID = "wa_companion"
         private const val NOTIF_ID = 42
         private const val POLL_MS = 15_000L
-        private const val DWELL_MS = 30_000L
+        // Short dwell for bubble scrape; inbound also covered by notification listener.
+        private const val DWELL_MS = 8_000L
         private const val SCRAPE_INTERVAL_MS = 1_500L
     }
 }

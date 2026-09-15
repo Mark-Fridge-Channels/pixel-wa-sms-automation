@@ -229,6 +229,34 @@ class SendAccessibilityService : AccessibilityService() {
             }
         }
 
+        /** Leave open chat so WhatsApp is not stuck on the conversation screen. */
+        fun leaveChatToList() {
+            val svc = instance ?: return
+            svc.tickHandler.post {
+                try {
+                    Log.i(TAG, "leaveChat: BACK")
+                    svc.performGlobalAction(GLOBAL_ACTION_BACK)
+                } catch (e: Exception) {
+                    Log.w(TAG, "leaveChat first BACK failed", e)
+                }
+            }
+            svc.tickHandler.postDelayed({
+                try {
+                    val root = svc.rootInActiveWindow
+                    val pkg = root?.packageName?.toString()
+                    if (pkg != "com.whatsapp") return@postDelayed
+                    val stillInChat =
+                        !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/entry").isNullOrEmpty()
+                    if (stillInChat) {
+                        Log.i(TAG, "leaveChat: still in chat, BACK again")
+                        svc.performGlobalAction(GLOBAL_ACTION_BACK)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "leaveChat second BACK failed", e)
+                }
+            }, 450L)
+        }
+
         private fun isChromeText(t: String): Boolean {
             val s = t.trim()
             if (s.equals("Message", ignoreCase = true)) return true

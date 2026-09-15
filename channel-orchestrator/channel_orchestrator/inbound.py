@@ -190,7 +190,7 @@ def handle_inbound_message(
                 sender=party_key or str(sender_raw or ""),
                 interaction_at=interaction_at,
                 thread_id=thread_id,
-                message_id=None,
+                message_id=str(provider_message_id) if provider_message_id else None,
                 task_id=task_id,
                 contact_id=contact_id,
                 title=title,

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .heartbeat import heartbeat_stale, read_heartbeat, touch_heartbeat
 from .inbound import handle_inbound_sms, handle_inbound_whatsapp
+from .inbound_dedupe import describe_skip, seen_or_mark
 from .outbound import finalize_whatsapp_job
 from .wa_jobs import get_wa_queue
 
@@ -88,6 +89,15 @@ async def sms_webhook(request: Request) -> JSONResponse:
     }
     INBOUND.append(event)
     _append_log(event)
+    # SMS Gate retries the same delivery if Notion/Portal handling is slow.
+    if seen_or_mark(
+        "SMS",
+        normalized.get("message_id"),
+        body=str(normalized.get("body") or ""),
+        sender=str(normalized.get("sender") or ""),
+    ):
+        touch_heartbeat("phone")
+        return JSONResponse(describe_skip("SMS", normalized.get("message_id")))
     result = handle_inbound_sms(normalized)
     touch_heartbeat("phone")
     return JSONResponse(
@@ -117,6 +127,14 @@ async def whatsapp_webhook(
     }
     INBOUND.append(event)
     _append_log(event)
+    if seen_or_mark(
+        "WHATSAPP",
+        normalized.get("message_id"),
+        body=str(normalized.get("body") or ""),
+        sender=str(normalized.get("sender") or ""),
+    ):
+        touch_heartbeat("phone")
+        return JSONResponse(describe_skip("WHATSAPP", normalized.get("message_id")))
     result = handle_inbound_whatsapp(normalized)
     touch_heartbeat("phone")
     return JSONResponse(
