@@ -164,42 +164,14 @@ def handle_inbound_message(
     matched_flag = bool(task_id and thread_id)
 
     label = channel_display_name(ch)
-    conversation_page = None
-
-    if write_notion and settings.notion_token and matched_flag and thread_id:
-        title = f"{label} Inbound — {party_key or sender_raw or 'unknown'}"
-        ext = None
-        if ch == "EMAIL":
-            ext = {
-                k: v
-                for k, v in {
-                    "gmailThreadId": gmail_thread_id,
-                    "gmailMessageId": provider_message_id,
-                    "outboundTo": reply_meta.get("outboundTo"),
-                    "replyFrom": reply_meta.get("replyFrom") or party_key,
-                    "replyMatch": reply_meta.get("replyMatch"),
-                    "proxyReply": reply_meta.get("proxyReply"),
-                    "sameOrgDomain": reply_meta.get("sameOrgDomain"),
-                    "unexpectedSender": reply_meta.get("unexpectedSender"),
-                }.items()
-                if v is not None and v != ""
-            }
-        try:
-            conversation_page = notion.create_inbound_conversation(
-                content=body,
-                sender=party_key or str(sender_raw or ""),
-                interaction_at=interaction_at,
-                thread_id=thread_id,
-                message_id=str(provider_message_id) if provider_message_id else None,
-                task_id=task_id,
-                contact_id=contact_id,
-                title=title,
-                channel=ch,
-                extended_parameters=ext,
-                subject=subject or None,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.exception("failed to write inbound conversation: %s", e)
+    # Inbound listen: log + Portal callback only. Do NOT create Notion Conversation
+    # rows here — Portal owns Conversation writes after /api/replies.
+    if write_notion:
+        log.debug(
+            "write_notion ignored for inbound conversation create channel=%s "
+            "(Portal owns Conversation inserts)",
+            label,
+        )
 
     webhook_result: dict[str, Any]
     if matched_flag and task_id and thread_id and body:
@@ -263,7 +235,7 @@ def handle_inbound_message(
         "task_page_id": task_id,
         "thread_id": thread_id,
         "contact_page_id": contact_id,
-        "conversation_page_id": (conversation_page or {}).get("id"),
+        "conversation_page_id": None,
         "from": party_key or sender_raw,
         "body": body,
         "subject": subject or None,
@@ -279,7 +251,7 @@ def handle_inbound_message(
         "matched": matched_flag,
         "task_page_id": task_id,
         "thread_id": thread_id,
-        "conversation_page_id": (conversation_page or {}).get("id"),
+        "conversation_page_id": None,
         "reply_meta": reply_meta or None,
         "webhook": webhook_result,
         "event": event,
