@@ -254,6 +254,31 @@ def wa_jobs_list(authorization: str | None = Header(default=None)) -> JSONRespon
     return JSONResponse({"ok": True, "jobs": get_wa_queue().list_jobs()})
 
 
+@app.post("/wa/jobs")
+async def wa_job_enqueue(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Manual enqueue for ops/tests. Body: {phone, text, task_id?}."""
+    _check_wa_token(authorization)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected json object")
+    phone = str(body.get("phone") or "").strip()
+    text = str(body.get("text") or "").strip()
+    if not phone or not text:
+        raise HTTPException(status_code=400, detail="phone and text required")
+    job = get_wa_queue().enqueue(
+        {
+            "phone": phone,
+            "text": text,
+            "task_id": body.get("task_id"),
+            "channel": "WHATSAPP",
+        }
+    )
+    return JSONResponse({"ok": True, "job": job})
+
+
 @app.post("/wa/heartbeat")
 def wa_heartbeat(authorization: str | None = Header(default=None)) -> JSONResponse:
     _check_wa_token(authorization)

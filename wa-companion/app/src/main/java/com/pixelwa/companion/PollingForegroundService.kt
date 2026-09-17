@@ -25,6 +25,7 @@ class PollingForegroundService : Service() {
     private val busy = AtomicBoolean(false)
     private lateinit var prefs: Prefs
     private lateinit var api: OrchestratorApi
+    private lateinit var screenWake: ScreenWake
 
     private val tick = object : Runnable {
         override fun run() {
@@ -40,6 +41,7 @@ class PollingForegroundService : Service() {
         super.onCreate()
         prefs = Prefs(this)
         api = OrchestratorApi(prefs)
+        screenWake = ScreenWake(this)
         createChannel()
     }
 
@@ -66,6 +68,13 @@ class PollingForegroundService : Service() {
             api.heartbeat()
             val job = api.nextJob() ?: return
             Log.i(TAG, "got job ${job.id} -> ${job.phone}")
+            screenWake.acquire(timeoutMs = 120_000L)
+            // Give the display a moment to turn on before launching WhatsApp UI.
+            try {
+                Thread.sleep(800)
+            } catch (_: InterruptedException) {
+                // continue
+            }
             val (ok, error) = sendViaWhatsApp(job)
             api.reportResult(
                 job.id,
@@ -85,6 +94,7 @@ class PollingForegroundService : Service() {
             Log.e(TAG, "poll failed", e)
             SendAccessibilityService.leaveChatToList()
         } finally {
+            screenWake.release()
             busy.set(false)
         }
     }
@@ -106,6 +116,8 @@ class PollingForegroundService : Service() {
         }
         SendAccessibilityService.armForSend()
         handler.post {
+            // Re-assert wake on the main thread right before UI launch.
+            screenWake.acquire(timeoutMs = 120_000L)
             val intent = Intent(Intent.ACTION_VIEW, uri).apply {
                 setPackage("com.whatsapp")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

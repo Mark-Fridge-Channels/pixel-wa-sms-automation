@@ -19,6 +19,9 @@ class OutboundCache:
       SMS/WA → phone E.164
       EMAIL  → normalized email
     Values include taskId + system threadId (and for email, gmailThreadId).
+
+    WhatsApp marks state=ready at job enqueue (not only after Companion ACK) so
+    inbound replies during send still match. Hard failures still mark failed.
     """
 
     STATE_PENDING = "pending"

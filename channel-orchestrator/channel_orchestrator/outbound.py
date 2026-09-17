@@ -176,7 +176,11 @@ def enqueue_whatsapp_job(
     cache: OutboundCache | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Resolve OK → In Progress + queue job for Companion; Notion Completed on job result."""
+    """Resolve OK → In Progress + queue job for Companion; Notion Completed on job result.
+
+    Mark outbound cache ready at enqueue time (not only after Companion confirms send)
+    so WhatsApp replies during send / after uncertain timeout still match Portal ingest.
+    """
     notion = notion or NotionClient()
     cache = cache or OutboundCache(channel="WHATSAPP")
     now = datetime.now(timezone.utc)
@@ -220,12 +224,14 @@ def enqueue_whatsapp_job(
         notion.update_task_status(resolved.task_id, "Failed", ended_at=now, notes=msg)
         return {"ok": False, "status": "failed", "reason": msg, "task_id": resolved.task_id}
 
-    cache.set_pending(
+    # Ready at enqueue: WA is a continuous chat; replies may arrive before Companion ACKs.
+    cache.set_ready(
         resolved.phone_e164,
         task_page_id=resolved.task_id,
         thread_id=resolved.thread_id,
         contact_page_id=resolved.contact_id,
         conversation_page_id=resolved.conversation_id,
+        sent_at=now,
     )
     notion.update_task_status(resolved.task_id, "In Progress")
     job = queue.enqueue(

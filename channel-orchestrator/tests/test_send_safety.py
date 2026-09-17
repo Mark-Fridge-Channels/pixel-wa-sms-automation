@@ -120,6 +120,44 @@ def test_wa_uncertain_finalize(tmp_path, monkeypatch):
     notion.update_conversation_outbound.assert_not_called()
 
 
+def test_wa_enqueue_marks_cache_ready_for_early_replies(tmp_path, monkeypatch):
+    """WA replies may arrive before Companion ACK; cache must be ready at enqueue."""
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "wa_daily_send_limit", 0)
+    from channel_orchestrator.cache import OutboundCache
+    from channel_orchestrator.notion_client import ResolvedTask
+    from channel_orchestrator.outbound import enqueue_whatsapp_job
+    from channel_orchestrator.wa_jobs import WaJobQueue
+
+    notion = MagicMock()
+    cache = OutboundCache(channel="WHATSAPP", path=tmp_path / "wa_cache.json")
+    monkeypatch.setattr(
+        "channel_orchestrator.outbound.get_wa_queue",
+        lambda: WaJobQueue(path=tmp_path / "wa_jobs.json"),
+    )
+    resolved = ResolvedTask(
+        task_id="task-wa-early",
+        title="t",
+        priority="P1",
+        scheduled_at="2026-09-17",
+        status="Pending",
+        contact_id="c",
+        keyperson_id="k",
+        phone_e164="+8615810494081",
+        conversation_id="conv-wa",
+        content="hello",
+        thread_id="THR-wa-early",
+        channel="WHATSAPP",
+    )
+    result = enqueue_whatsapp_job(resolved, notion=notion, cache=cache)
+    assert result["status"] == "queued"
+    ready = cache.get_ready_for_reply("+8615810494081")
+    assert ready is not None
+    assert ready["state"] == "ready"
+    assert ready["task_page_id"] == "task-wa-early"
+    assert ready["thread_id"] == "THR-wa-early"
+
+
 def test_retry_blocked_by_uncertain_notes(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     notion = MagicMock()
