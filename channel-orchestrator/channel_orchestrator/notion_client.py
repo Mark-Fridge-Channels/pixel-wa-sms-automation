@@ -11,7 +11,16 @@ import httpx
 from .channels import channel_display_name, normalize_channel
 from .config import settings
 from .email_util import email_value_from_prop, normalize_email
-from .notion_props import date_start, phone_value, props, relation_ids, rich_text_plain, select_name
+from .notion_props import (
+    date_start,
+    is_scheduled_due,
+    parse_notion_datetime,
+    phone_value,
+    props,
+    relation_ids,
+    rich_text_plain,
+    select_name,
+)
 from .phone import normalize_e164_with_reason
 
 log = logging.getLogger(__name__)
@@ -78,6 +87,7 @@ class NotionClient:
         return results
 
     def query_today_pending(self, day_yyyy_mm_dd: str, channel: str = "SMS") -> list[dict[str, Any]]:
+        """Legacy: Pending + Channel + Scheduled At equals calendar day (date-only)."""
         ch = channel_display_name(channel)
         filt = {
             "and": [
@@ -90,6 +100,55 @@ class NotionClient:
 
     def query_today_sms_pending(self, day_yyyy_mm_dd: str) -> list[dict[str, Any]]:
         return self.query_today_pending(day_yyyy_mm_dd, channel="SMS")
+
+    def query_due_pending(
+        self,
+        *,
+        channels: list[str] | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Pending tasks whose Scheduled At (with time+tz) is <= now.
+
+        Notion filter uses on_or_before as a coarse gate; final due check is
+        client-side with timezone-aware parsing.
+        """
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        chans = channels or ["SMS", "WHATSAPP", "EMAIL"]
+        channel_filters = [
+            {"property": "Channel", "select": {"equals": channel_display_name(c)}} for c in chans
+        ]
+        # Coarse gate: include anything on_or_before "now" ISO (Notion compares dates).
+        filt: dict[str, Any] = {
+            "and": [
+                {"property": "Task Status", "status": {"equals": "Pending"}},
+                {"or": channel_filters} if len(channel_filters) > 1 else channel_filters[0],
+                {
+                    "property": "Scheduled At",
+                    "date": {"on_or_before": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+                },
+            ]
+        }
+        pages = self.query_data_source(self.task_ds, {"filter": filt})
+        due: list[dict[str, Any]] = []
+        for page in pages:
+            p = props(page)
+            if not is_scheduled_due(p.get("Scheduled At"), now=now, default_tz=settings.timezone):
+                continue
+            due.append(page)
+
+        priority_order = {"P0": 0, "P1": 1, "P2": 2}
+
+        def sort_key(page: dict[str, Any]) -> tuple:
+            p = props(page)
+            scheduled = parse_notion_datetime(p.get("Scheduled At"), default_tz=settings.timezone)
+            ts = scheduled.astimezone(timezone.utc).timestamp() if scheduled else 0.0
+            pri = priority_order.get(select_name(p.get("Priority")) or "P2", 9)
+            return (ts, pri, page.get("id") or "")
+
+        due.sort(key=sort_key)
+        return due
 
     def get_task_status(self, task_id: str) -> str | None:
         page = self.get_page(task_id)

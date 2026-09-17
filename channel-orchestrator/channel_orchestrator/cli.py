@@ -5,15 +5,16 @@ import json
 import logging
 import time
 from datetime import date, datetime
-from zoneinfo import ZoneInfo
 
 import uvicorn
 
+from .channels import normalize_channel
 from .config import settings
 from .gateway import SmsGatewayClient
 from .inbound import poll_gmail_inbound
-from .outbound import process_due
-from .scheduler import build_daily_plan, load_plan, normalize_channel, ny_today
+from .runtime_settings import get_scan_interval_seconds
+from .scan_runtime import drain_until_idle, scan_and_enqueue, scheduler_tick
+from .scheduler import build_daily_plan, ny_today
 from .server import app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -30,6 +31,12 @@ def list_webhooks() -> list:
     return client.list_webhooks()
 
 
+def _channel_list(raw: str) -> list[str]:
+    if raw.lower() == "all":
+        return ["SMS", "WHATSAPP", "EMAIL"]
+    return [normalize_channel(raw)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="channel_orchestrator")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -40,7 +47,7 @@ def main() -> None:
     p_send.add_argument("--to", required=True)
     p_send.add_argument("--text", required=True)
 
-    p_serve = sub.add_parser("serve", help="Run webhook + WA job API server")
+    p_serve = sub.add_parser("serve", help="Run webhook + WA job API + monitor server")
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8787)
 
@@ -49,25 +56,45 @@ def main() -> None:
     p_wh.add_argument("--event", default="sms:received")
     sub.add_parser("webhook-list", help="List gateway webhooks")
 
-    p_plan = sub.add_parser("plan-today", help="Fetch today's Pending tasks and schedule")
+    p_plan = sub.add_parser(
+        "plan-today",
+        help="(legacy) Build daily_plan JSON from today's Pending tasks",
+    )
     p_plan.add_argument("--dry-run", action="store_true")
     p_plan.add_argument("--day", default=None)
     p_plan.add_argument("--channel", default="SMS", help="SMS, WhatsApp, or Email")
 
-    p_sched = sub.add_parser("run-scheduler", help="Loop: plan + process due (+ Gmail poll)")
+    p_sched = sub.add_parser(
+        "run-scheduler",
+        help="Loop: scan Notion due Pending → queue → SMS/WA serial + Email parallel (+ Gmail poll)",
+    )
     p_sched.add_argument("--once", action="store_true")
     p_sched.add_argument("--dry-run", action="store_true")
-    p_sched.add_argument("--day", default=None)
     p_sched.add_argument(
         "--channel",
         default="all",
         help="SMS, WhatsApp, Email, or all",
     )
+    p_sched.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass uncertain-send cooldown / 【发送结果未确认】 retry guard",
+    )
 
-    p_once = sub.add_parser("run-once", help="Build plan if needed and process due once")
+    p_once = sub.add_parser("run-once", help="Scan due tasks now, drain queue once")
     p_once.add_argument("--dry-run", action="store_true")
-    p_once.add_argument("--day", default=None)
     p_once.add_argument("--channel", default="all")
+    p_once.add_argument(
+        "--scan-now",
+        action="store_true",
+        default=True,
+        help="Immediately scan Notion (default on)",
+    )
+    p_once.add_argument(
+        "--no-drain",
+        action="store_true",
+        help="Only enqueue; do not execute/drain",
+    )
     p_once.add_argument(
         "--force",
         action="store_true",
@@ -130,74 +157,76 @@ def main() -> None:
         print(json.dumps(results, ensure_ascii=False, indent=2))
         return
 
-    if args.cmd in {"run-once", "run-scheduler"}:
-        day = args.day or ny_today().isoformat()
-        channels = (
-            ["SMS", "WHATSAPP", "EMAIL"]
-            if args.channel.lower() == "all"
-            else [normalize_channel(args.channel)]
-        )
+    if args.cmd == "run-once":
+        channels = _channel_list(args.channel)
+        force = bool(args.force)
+        enqueued = []
+        if args.scan_now:
+            enqueued = scan_and_enqueue(channels=channels)
+        results = []
+        if not args.no_drain:
+            results = drain_until_idle(dry_run=args.dry_run, force=force)
+        payload = {"enqueued": enqueued, "results": results}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
 
-        force = bool(getattr(args, "force", False))
-
+    if args.cmd == "run-scheduler":
+        channels = _channel_list(args.channel)
+        force = bool(args.force)
         last_gmail_poll = 0.0
+        last_scan = 0.0
 
-        def tick() -> None:
-            nonlocal last_gmail_poll
-            tz = ZoneInfo(settings.timezone)
-            now = datetime.now(tz)
-            all_results = []
-            for ch in channels:
-                plan = load_plan(day, ch)
-                need_build = plan is None
-                if plan is None or (
-                    now.hour > settings.daily_plan_hour
-                    or (
-                        now.hour == settings.daily_plan_hour
-                        and now.minute >= settings.daily_plan_minute
-                    )
-                ):
-                    need_build = True
-                if need_build:
-                    d = date.fromisoformat(day)
-                    plan = build_daily_plan(day=d, channel=ch, now=now)
-                    log.info("plan ready day=%s channel=%s items=%d", plan.day, ch, len(plan.items))
-                results = process_due(
-                    day=day, channel=ch, dry_run=args.dry_run, force=force, now=now
-                )
-                all_results.extend(results)
+        def tick(*, force_scan: bool = False) -> None:
+            nonlocal last_gmail_poll, last_scan
+            now_mono = time.time()
+            scan_interval = get_scan_interval_seconds()
+            do_scan = force_scan or args.once or (now_mono - last_scan >= scan_interval)
+            out = scheduler_tick(
+                channels=channels,
+                dry_run=args.dry_run,
+                force=force,
+                scan=do_scan,
+                drain=True,
+            )
+            if do_scan:
+                last_scan = now_mono
 
-            # Gmail inbound poll (server-side; independent of email outbound channel filter)
             if settings.gmail_refresh_token and not args.dry_run:
-                now_mono = time.time()
                 if now_mono - last_gmail_poll >= max(5, settings.gmail_poll_seconds):
                     last_gmail_poll = now_mono
                     try:
                         inbound_results = poll_gmail_inbound()
                         if inbound_results:
-                            all_results.append({"gmail_inbound": inbound_results})
+                            out["gmail_inbound"] = inbound_results
                     except Exception:  # noqa: BLE001
                         log.exception("gmail poll failed")
 
-            if all_results:
-                print(json.dumps(all_results, ensure_ascii=False, indent=2))
+            if out.get("enqueued") or out.get("results") or out.get("gmail_inbound"):
+                print(json.dumps(out, ensure_ascii=False, indent=2))
 
-        if args.cmd == "run-once" or args.once:
-            tick()
+        if args.once:
+            tick(force_scan=True)
+            # Drain remaining phone jobs with gaps for --once.
+            if not args.dry_run:
+                more = drain_until_idle(dry_run=args.dry_run, force=force, max_seconds=min(600, get_scan_interval_seconds() * 2))
+                if more:
+                    print(json.dumps({"drained": more}, ensure_ascii=False, indent=2))
             return
 
         log.info(
-            "scheduler running poll=%ss tz=%s channels=%s",
-            settings.scheduler_poll_seconds,
-            settings.timezone,
+            "scheduler running scan=%ss send_gap from runtime; channels=%s tz=%s",
+            get_scan_interval_seconds(),
             channels,
+            settings.timezone,
         )
+        # Immediate first scan so deploy doesn't wait a full interval.
+        tick(force_scan=True)
         while True:
             try:
                 tick()
             except Exception:  # noqa: BLE001
                 log.exception("scheduler tick failed")
-            time.sleep(settings.scheduler_poll_seconds)
+            time.sleep(1)
 
 
 if __name__ == "__main__":

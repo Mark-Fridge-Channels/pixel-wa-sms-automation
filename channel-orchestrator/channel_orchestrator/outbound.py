@@ -214,7 +214,8 @@ def enqueue_whatsapp_job(
         }
 
     day_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if queue.count_done_today(day_utc) >= settings.wa_daily_send_limit:
+    # 0 = disabled (no daily WhatsApp cap)
+    if settings.wa_daily_send_limit > 0 and queue.count_done_today(day_utc) >= settings.wa_daily_send_limit:
         msg = f"已达当日 WhatsApp 发送上限（{settings.wa_daily_send_limit}）"
         notion.update_task_status(resolved.task_id, "Failed", ended_at=now, notes=msg)
         return {"ok": False, "status": "failed", "reason": msg, "task_id": resolved.task_id}
@@ -525,6 +526,51 @@ def _apply_result_status(item: PlanItem, result: dict[str, Any], *, dry_run: boo
         item.status = "planned"
 
 
+def execute_task(
+    task_id: str,
+    *,
+    channel: str | None = None,
+    notion: NotionClient | None = None,
+    gateway: SmsGatewayClient | None = None,
+    cache: OutboundCache | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Execute one Notion task without daily_plan JSON (scan/queue path)."""
+    notion = notion or NotionClient()
+    status = notion.get_task_status(task_id)
+    if status != "Pending":
+        msg = f"执行前复核非 Pending（当前={status}）"
+        record_attempt(task_id, channel=normalize_channel(channel or "SMS"), outcome="skipped", detail=msg)
+        return {"ok": True, "status": "skipped", "reason": msg, "task_id": task_id, "notion_status": status}
+
+    resolved = notion.resolve_task_for_send(task_id)
+    ch = normalize_channel(channel or resolved.channel or "SMS")
+
+    blocked = retry_blocked_reason(
+        notion=notion,
+        task_id=task_id,
+        conversation_id=resolved.conversation_id,
+        force=force,
+    )
+    if blocked:
+        record_attempt(task_id, channel=ch, outcome="skipped", detail=blocked)
+        return {"ok": True, "status": "skipped", "reason": blocked, "task_id": task_id}
+
+    if ch == "WHATSAPP":
+        wa_cache = cache if cache and cache.channel in {"WHATSAPP", "WA"} else OutboundCache(channel="WHATSAPP")
+        return enqueue_whatsapp_job(resolved, notion=notion, cache=wa_cache, dry_run=dry_run)
+
+    if ch == "EMAIL":
+        email_cache = cache if cache and cache.channel == "EMAIL" else OutboundCache(channel="EMAIL")
+        return execute_resolved_email(resolved, notion=notion, cache=email_cache, dry_run=dry_run)
+
+    sms_cache = cache if cache and cache.channel == "SMS" else OutboundCache(channel="SMS")
+    return execute_resolved_sms(
+        resolved, notion=notion, gateway=gateway, cache=sms_cache, dry_run=dry_run
+    )
+
+
 def execute_plan_item(
     item: PlanItem,
     plan: DailyPlan,
@@ -537,59 +583,24 @@ def execute_plan_item(
 ) -> dict[str, Any]:
     notion = notion or NotionClient()
     channel = normalize_channel(item.channel or plan.channel or "SMS")
-    status = notion.get_task_status(item.task_id)
-    if status != "Pending":
-        item.status = "skipped"
-        item.notes = f"执行前复核非 Pending（当前={status}）"
-        save_plan(plan)
-        return {"ok": True, "status": "skipped", "task_id": item.task_id, "notion_status": status}
-
-    # Resolve early so Conversation Sent / uncertain Notes guards can run.
-    resolved = notion.resolve_task_for_send(item.task_id)
-    item.phone = resolved.phone_e164 or resolved.email
-    item.conversation_id = resolved.conversation_id
-    item.contact_id = resolved.contact_id
-
-    blocked = retry_blocked_reason(
+    result = execute_task(
+        item.task_id,
+        channel=channel,
         notion=notion,
-        task_id=item.task_id,
-        conversation_id=resolved.conversation_id,
+        gateway=gateway,
+        cache=cache,
+        dry_run=dry_run,
         force=force,
     )
-    if blocked:
-        item.status = "skipped"
-        item.notes = blocked
-        save_plan(plan)
-        record_attempt(item.task_id, channel=channel, outcome="skipped", detail=blocked)
-        return {
-            "ok": True,
-            "status": "skipped",
-            "reason": blocked,
-            "task_id": item.task_id,
-        }
-
-    item.status = "in_progress"
-    save_plan(plan)
-
-    if channel == "WHATSAPP":
-        wa_cache = cache if cache and cache.channel in {"WHATSAPP", "WA"} else OutboundCache(channel="WHATSAPP")
-        result = enqueue_whatsapp_job(resolved, notion=notion, cache=wa_cache, dry_run=dry_run)
-        _apply_result_status(item, result, dry_run=dry_run)
-        save_plan(plan)
-        return result
-
-    if channel == "EMAIL":
-        email_cache = cache if cache and cache.channel == "EMAIL" else OutboundCache(channel="EMAIL")
-        result = execute_resolved_email(resolved, notion=notion, cache=email_cache, dry_run=dry_run)
-        _apply_result_status(item, result, dry_run=dry_run)
-        save_plan(plan)
-        return result
-
-    sms_cache = cache if cache and cache.channel == "SMS" else OutboundCache(channel="SMS")
-    result = execute_resolved_sms(
-        resolved, notion=notion, gateway=gateway, cache=sms_cache, dry_run=dry_run
-    )
+    # Keep plan item fields in sync for legacy daily_plan tools.
+    if result.get("status") != "skipped":
+        resolved = notion.resolve_task_for_send(item.task_id)
+        item.phone = resolved.phone_e164 or resolved.email
+        item.conversation_id = resolved.conversation_id
+        item.contact_id = resolved.contact_id
     _apply_result_status(item, result, dry_run=dry_run)
+    if result.get("status") == "skipped":
+        item.notes = result.get("reason")
     save_plan(plan)
     return result
 

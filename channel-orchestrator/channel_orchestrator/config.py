@@ -26,14 +26,21 @@ class Settings(BaseSettings):
     saily_phone_e164: str = "+17794362345"
 
     timezone: str = "America/New_York"
+    # Legacy (daily-plan era). Outbound scan no longer gates on work windows.
     work_windows: str = "09:00-12:00,14:00-18:00"
     min_send_interval_seconds: int = 90
     wa_min_send_interval_seconds: int = 120
-    wa_daily_send_limit: int = 30
+    # 0 = disabled (no daily WhatsApp cap)
+    wa_daily_send_limit: int = 0
     wa_job_lease_seconds: int = 180
     daily_plan_hour: int = 8
     daily_plan_minute: int = 30
+    # Legacy poll used by old daily-plan loop; prefer scheduler_scan_seconds.
     scheduler_poll_seconds: int = 20
+    # How often Scanner queries Notion for due Pending tasks.
+    scheduler_scan_seconds: int = 600
+    # Gap between SMS/WA starts (Email is parallel and ignores this).
+    send_gap_seconds: int = 90
     device_heartbeat_stale_minutes: int = 45
     # After an uncertain send (timeout / unconfirmed), block Pending re-runs this long.
     outbound_uncertain_cooldown_seconds: int = 3600
@@ -41,6 +48,8 @@ class Settings(BaseSettings):
     reply_webhook_url: str = ""
     reply_webhook_token: str = ""
     wa_api_token: str = ""
+    # Optional; falls back to wa_api_token for /api/monitor/settings
+    monitor_token: str = ""
 
     gmail_client_id: str = ""
     gmail_client_secret: str = ""
