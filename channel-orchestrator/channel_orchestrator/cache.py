@@ -185,7 +185,9 @@ class OutboundCache:
         entry = self.get(party_raw)
         if not entry:
             return None
-        if entry.get("state") != self.STATE_READY:
+        # ready = confirmed/enqueued mapping; pending = legacy pre-enqueue-ready rows.
+        # Both are matchable so WA replies during send still ingest. failed is not.
+        if entry.get("state") not in {self.STATE_READY, self.STATE_PENDING}:
             return None
         if not entry.get("task_page_id") or not entry.get("thread_id"):
             return None

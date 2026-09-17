@@ -378,6 +378,39 @@ def test_wa_inbound_uses_whatsapp_channel(tmp_path, monkeypatch):
     assert wh.post_reply.call_args.args[0]["messageId"] == ""
 
 
+def test_wa_inbound_matches_legacy_pending_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "notion_token", "")
+    from channel_orchestrator.inbound import handle_inbound_whatsapp
+
+    cache = OutboundCache(channel="WHATSAPP", path=tmp_path / "wa_cache.json")
+    cache.set_pending(
+        "+8615810494081",
+        task_page_id="wa-pending-task",
+        thread_id="THR-pending",
+        contact_page_id="c",
+        conversation_page_id="v",
+    )
+    wh = MagicMock()
+    wh.build_whatsapp_payload.return_value = {
+        "taskId": "wa-pending-task",
+        "threadId": "THR-pending",
+        "content": "early reply",
+        "channel": "WhatsApp",
+        "messageId": "",
+    }
+    wh.post_reply.return_value = {"ok": True}
+    result = handle_inbound_whatsapp(
+        {"sender": "+8615810494081", "body": "early reply"},
+        notion=MagicMock(),
+        cache=cache,
+        reply_webhook=wh,
+        write_notion=False,
+    )
+    assert result["matched"] is True
+    wh.post_reply.assert_called_once()
+
+
 def test_reply_webhook_forces_empty_message_id(monkeypatch):
     from channel_orchestrator.reply_webhook import ReplyWebhookClient
 
