@@ -149,16 +149,20 @@ def recent_uncertain_attempt(
 
 
 def conversation_already_sent(notion: Any, conversation_id: str | None) -> bool:
+    """True when outbound Conversation already has Interaction At (schema dropped Message Status)."""
     if not conversation_id:
         return False
     try:
         page = notion.get_page(conversation_id)
-        from .notion_props import props, select_name
+        from .notion_props import date_start, props, rich_text_plain
 
-        status = select_name(props(page).get("Message Status"))
-        return status == "Sent"
+        p = props(page)
+        if date_start(p.get("Interaction At")):
+            return True
+        notes = rich_text_plain(p.get("Notes")) or ""
+        return notes.startswith("已发送")
     except Exception:  # noqa: BLE001
-        log.exception("failed to read conversation message status")
+        log.exception("failed to read conversation send markers")
         return False
 
 
@@ -200,5 +204,5 @@ def retry_blocked_reason(
             "禁止自动重试，避免双发；确认后加【允许重试】或 --force"
         )
     if conversation_already_sent(notion, conversation_id):
-        return "关联 Conversation 已是 Sent：跳过重发，避免双发"
+        return "关联 Conversation 已发送（Interaction At 已填）：跳过重发，避免双发"
     return None

@@ -167,7 +167,7 @@ def test_retry_blocked_by_uncertain_notes(tmp_path, monkeypatch):
                 "type": "rich_text",
                 "rich_text": [{"plain_text": uncertain_notes("先前超时"), "type": "text", "text": {"content": uncertain_notes("先前超时")}}],
             },
-            "Message Status": {"type": "select", "select": {"name": "Pending"}},
+            "Interaction At": {"type": "date", "date": None},
         }
     }
     reason = retry_blocked_reason(
@@ -190,7 +190,7 @@ def test_retry_blocked_by_cooldown(tmp_path, monkeypatch):
     notion.get_page.return_value = {
         "properties": {
             "Notes": {"type": "rich_text", "rich_text": []},
-            "Message Status": {"type": "select", "select": {"name": "Pending"}},
+            "Interaction At": {"type": "date", "date": None},
         }
     }
     reason = retry_blocked_reason(
@@ -221,14 +221,22 @@ def test_execute_plan_item_skips_sent_conversation(tmp_path, monkeypatch):
         if page_id == "conv-sent":
             return {
                 "properties": {
-                    "Message Status": {"type": "select", "select": {"name": "Sent"}},
-                    "Notes": {"type": "rich_text", "rich_text": []},
+                    "Interaction At": {
+                        "type": "date",
+                        "date": {"start": "2026-09-15T12:00:00.000Z"},
+                    },
+                    "Notes": {
+                        "type": "rich_text",
+                        "rich_text": [
+                            {"plain_text": "已发送。", "type": "text", "text": {"content": "已发送。"}}
+                        ],
+                    },
                 }
             }
         return {
             "properties": {
                 "Notes": {"type": "rich_text", "rich_text": []},
-                "Message Status": {"type": "select", "select": {"name": "Pending"}},
+                "Interaction At": {"type": "date", "date": None},
             }
         }
 
@@ -252,4 +260,4 @@ def test_execute_plan_item_skips_sent_conversation(tmp_path, monkeypatch):
     plan.items.append(item)
     result = execute_plan_item(item, plan, notion=notion, gateway=MagicMock())
     assert result["status"] == "skipped"
-    assert "Sent" in (result.get("reason") or "")
+    assert "已发送" in (result.get("reason") or "")

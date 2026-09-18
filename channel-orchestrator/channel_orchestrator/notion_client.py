@@ -182,14 +182,20 @@ class NotionClient:
         message_id: str | None,
         thread_id: str | None,
     ) -> dict[str, Any]:
+        # ConversationDB no longer has "Message Status"; Sent/Failed live in Notes.
+        # Interaction At set ⇒ outbound already executed (see conversation_already_sent).
         page = self.get_page(conversation_id)
         p = props(page)
         properties: dict[str, Any] = {
-            "Message Status": {"select": {"name": message_status}},
             "Interaction At": {
                 "date": {"start": interaction_at.astimezone(timezone.utc).isoformat()}
             },
         }
+        status_note = {
+            "Sent": "已发送。",
+            "Failed": "发送失败。",
+        }.get(message_status, f"状态：{message_status}")
+        properties["Notes"] = {"rich_text": [{"text": {"content": status_note[:1900]}}]}
         if sender and not rich_text_plain(p.get("Sender")):
             properties["Sender"] = {"rich_text": [{"text": {"content": sender}}]}
         if message_id:
@@ -237,8 +243,8 @@ class NotionClient:
             "Direction": {"select": {"name": "Inbound"}},
             "Content": {"rich_text": [{"text": {"content": (content or "")[:1900]}}]},
             "Sender": {"rich_text": [{"text": {"content": sender}}]},
-            "Message Status": {"select": {"name": "Received"}},
             "Reply Status": {"select": {"name": "Needs Reply"}},
+            "Notes": {"rich_text": [{"text": {"content": "已收到。"}}]},
             "Interaction At": {
                 "date": {"start": interaction_at.astimezone(timezone.utc).isoformat()}
             },
