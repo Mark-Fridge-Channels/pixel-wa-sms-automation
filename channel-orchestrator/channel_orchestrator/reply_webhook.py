@@ -50,7 +50,18 @@ class ReplyWebhookClient:
         }
         if payload.get("subject") is not None or payload.get("channel") == "Email":
             body["subject"] = payload.get("subject") or ""
-        if not body["taskId"] or not body["threadId"] or not body["content"]:
+        if not body["taskId"] or not body["threadId"]:
+            return {
+                "ok": False,
+                "skipped": True,
+                "reason": "missing_taskId_or_threadId",
+                "payload": body,
+            }
+        ext = body.get("extendedParameters") or {}
+        has_media = bool(ext.get("mediaUrl"))
+        if not body["content"] and has_media:
+            body["content"] = ext.get("mediaType") and f"[{ext.get('mediaType')}]" or "[media]"
+        if not body["content"]:
             return {
                 "ok": False,
                 "skipped": True,
@@ -114,16 +125,47 @@ class ReplyWebhookClient:
         occurred_at: datetime | str | None,
         whatsapp_conversation_id: str | None = None,
         whatsapp_message_id: str | None = None,
+        media_url: str | None = None,
+        media_type: str | None = None,
+        media_content_type: str | None = None,
+        media_filename: str | None = None,
+        extra_extended: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ext: dict[str, Any] = {}
         if whatsapp_conversation_id:
             ext["whatsappConversationId"] = whatsapp_conversation_id
         if whatsapp_message_id:
             ext["whatsappMessageId"] = whatsapp_message_id
+        if media_url:
+            ext["mediaUrl"] = media_url
+        if media_type:
+            ext["mediaType"] = media_type
+        if media_content_type:
+            ext["mediaContentType"] = media_content_type
+        if media_filename:
+            ext["mediaFilename"] = media_filename
+        if extra_extended:
+            ext.update({k: v for k, v in extra_extended.items() if v is not None})
+        body_content = (content or "").strip()
+        placeholders = {
+            f"[{media_type}]" if media_type else "",
+            "[image]",
+            "[video]",
+            "[audio]",
+            "[file]",
+            "[media]",
+        }
+        if media_url:
+            if not body_content or body_content in placeholders:
+                body_content = media_url
+            elif media_url not in body_content:
+                body_content = f"{body_content}\n{media_url}"
+        elif not body_content and media_type:
+            body_content = f"[{media_type}]"
         return {
             "taskId": task_id,
             "threadId": thread_id,
-            "content": content,
+            "content": body_content,
             "channel": "WhatsApp",
             "sender": sender or "",
             "messageId": "",

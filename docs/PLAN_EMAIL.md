@@ -12,11 +12,11 @@
 - 跟帖：Extended Parameters 有 `gmailThreadId` → 同线程回复。
 - 入站：轮询 `users.history.list` → `POST /api/replies`（`channel=Email`，`messageId=""`，ext 带 Gmail ids）。
 
-## 前置（mark@fridgechannels.com）
+## 前置（ella@fridgechannels.com）
 
 ### A. Google Cloud Console 逐步（带 URL）
 
-登录账号建议：有 **fridgechannels.com Workspace 管理权限** 的账号（或能创建 GCP 项目的人）。目标邮箱是 `mark@fridgechannels.com`。
+登录账号建议：有 **fridgechannels.com Workspace 管理权限** 的账号（或能创建 GCP 项目的人）。目标邮箱是 `ella@fridgechannels.com`。
 
 #### 1) 打开 Cloud Console / 选项目
 
@@ -82,11 +82,11 @@ https://admin.google.com/
 
 ```bash
 cd channel-orchestrator
-# 先写入 GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_USER=mark@fridgechannels.com
+# 先写入 GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_USER=ella@fridgechannels.com
 python -m channel_orchestrator.cli gmail-auth
 ```
 
-浏览器会打开 Google 登录；**必须登录** `mark@fridgechannels.com`。  
+浏览器会打开 Google 登录；**必须登录** `ella@fridgechannels.com`。  
 同意后终端打印 `GMAIL_REFRESH_TOKEN=...`，写回 `.env`。
 
 本地回调地址（脚本已写死，无需在 GCP 额外配置 Desktop 类型）：  
@@ -104,7 +104,7 @@ python -m channel_orchestrator.cli gmail-poll   # 能跑通且不报 token 错�
 GMAIL_CLIENT_ID=.....apps.googleusercontent.com
 GMAIL_CLIENT_SECRET=.....
 GMAIL_REFRESH_TOKEN=.....
-GMAIL_USER=mark@fridgechannels.com
+GMAIL_USER=ella@fridgechannels.com
 GMAIL_POLL_SECONDS=30
 ```
 
@@ -116,7 +116,7 @@ GMAIL_POLL_SECONDS=30
 GMAIL_CLIENT_ID=
 GMAIL_CLIENT_SECRET=
 GMAIL_REFRESH_TOKEN=
-GMAIL_USER=mark@fridgechannels.com
+GMAIL_USER=ella@fridgechannels.com
 GMAIL_POLL_SECONDS=30
 ```
 

@@ -46,12 +46,34 @@ class PollingForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIF_ID, buildNotification(prefs.automationEnabled))
+        startForeground(NOTIF_ID, buildNotification(prefs.automationEnabled, vpnOk = true))
         if (!running) {
             running = true
             handler.post(tick)
         }
         return START_STICKY
+    }
+
+    private fun maybeWatchVpn() {
+        if (!prefs.vpnWatchdogEnabled) {
+            api.heartbeat()
+            return
+        }
+        val snap = VpnHealth.probe(this, prefs)
+        api.heartbeat(snap)
+        if (snap.healthy) return
+        if (!VpnWatchdog.shouldRecover(prefs)) return
+        Log.w(TAG, "VPN unhealthy, recovering: ${snap.detail}")
+        screenWake.acquire(timeoutMs = 90_000L)
+        val ok = VpnWatchdog.recover(this, prefs)
+        VpnHealth.invalidate()
+        api.heartbeat(VpnHealth.probe(this, prefs, force = true).copy(recovered = ok))
+        refreshNotification(ok)
+    }
+
+    private fun refreshNotification(vpnOk: Boolean) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIF_ID, buildNotification(prefs.automationEnabled, vpnOk))
     }
 
     override fun onDestroy() {
@@ -65,10 +87,11 @@ class PollingForegroundService : Service() {
     private fun pollOnce() {
         if (!busy.compareAndSet(false, true)) return
         try {
-            api.heartbeat()
+            maybeWatchVpn()
             val job = api.nextJob() ?: return
             Log.i(TAG, "got job ${job.id} -> ${job.phone}")
-            screenWake.acquire(timeoutMs = 120_000L)
+            val wakeMs = if (job.hasMedia) 600_000L else 120_000L
+            screenWake.acquire(timeoutMs = wakeMs)
             // Give the display a moment to turn on before launching WhatsApp UI.
             try {
                 Thread.sleep(800)
@@ -100,15 +123,73 @@ class PollingForegroundService : Service() {
     }
 
     private fun sendViaWhatsApp(job: WaJob): Pair<Boolean, String?> {
+        if (job.hasMedia) {
+            return sendMediaViaWhatsApp(job)
+        }
+        return sendTextViaWhatsApp(job)
+    }
+
+    private fun sendTextViaWhatsApp(job: WaJob): Pair<Boolean, String?> {
         val digits = job.phone.filter { it.isDigit() }
         val encoded = URLEncoder.encode(job.text, StandardCharsets.UTF_8.toString())
         // api.whatsapp.com is more reliable for numbers not yet in the chat list
         val uri = "https://api.whatsapp.com/send?phone=$digits&text=$encoded".toUri()
+        return launchAndAwaitSend(
+            job = job,
+            pendingText = job.text,
+            timeoutSec = 35,
+        ) {
+            Intent(Intent.ACTION_VIEW, uri).apply {
+                setPackage("com.whatsapp")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
+    }
+
+    private fun sendMediaViaWhatsApp(job: WaJob): Pair<Boolean, String?> {
+        val mediaUrl = job.mediaUrl ?: return false to "缺少 mediaUrl"
+        val mediaType = job.mediaType ?: return false to "缺少 mediaType"
+        Log.i(TAG, "download media type=$mediaType url=${mediaUrl.take(80)}")
+        val file = MediaHelper.downloadToCache(this, mediaUrl, mediaType)
+            ?: return false to "媒体下载失败"
+        val digits = job.phone.filter { it.isDigit() }
+        val mime = MediaHelper.mimeFor(mediaType, file.name)
+        val contentUri = MediaHelper.fileProviderUri(this, file)
+        return launchAndAwaitSend(
+            job = job,
+            pendingText = job.text,
+            timeoutSec = 180,
+        ) {
+            grantUriPermission(
+                "com.whatsapp",
+                contentUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+            Intent(Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, contentUri)
+                if (job.text.isNotBlank()) {
+                    putExtra(Intent.EXTRA_TEXT, job.text)
+                }
+                // Opens chat for this number when WhatsApp honors the undocumented jid extra.
+                putExtra("jid", "$digits@s.whatsapp.net")
+                setPackage("com.whatsapp")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+    }
+
+    private fun launchAndAwaitSend(
+        job: WaJob,
+        pendingText: String,
+        timeoutSec: Long,
+        intentFactory: () -> Intent,
+    ): Pair<Boolean, String?> {
         val latch = CountDownLatch(1)
         var result = false
         var err: String? = null
         SendCoordinator.pendingJobId = job.id
-        SendCoordinator.pendingText = job.text
+        SendCoordinator.pendingText = pendingText
         SendCoordinator.callback = { ok, error ->
             result = ok
             err = error
@@ -116,20 +197,15 @@ class PollingForegroundService : Service() {
         }
         SendAccessibilityService.armForSend()
         handler.post {
-            // Re-assert wake on the main thread right before UI launch.
-            screenWake.acquire(timeoutMs = 120_000L)
-            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                setPackage("com.whatsapp")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
+            screenWake.acquire(timeoutMs = if (job.hasMedia) 600_000L else 120_000L)
             try {
-                startActivity(intent)
+                startActivity(intentFactory())
             } catch (e: Exception) {
                 Log.e(TAG, "open whatsapp failed", e)
                 SendCoordinator.onSendAttempted(false, "无法打开 WhatsApp：${e.message}")
             }
         }
-        val finished = latch.await(35, TimeUnit.SECONDS)
+        val finished = latch.await(timeoutSec, TimeUnit.SECONDS)
         if (!finished) {
             val want = SendCoordinator.pendingText?.trim().orEmpty()
             if (want.isNotEmpty()) {
@@ -144,11 +220,13 @@ class PollingForegroundService : Service() {
                     return true to null
                 }
             }
-            SendCoordinator.onSendAttempted(
-                false,
-                "UNCERTAIN:发送超时（35s 未确认，请勿直接重试）",
-            )
-            return false to "UNCERTAIN:发送超时（35s 未确认，请勿直接重试）"
+            // Media-only: a11y may have clicked send without a text bubble to match.
+            if (job.hasMedia && want.isEmpty()) {
+                Log.w(TAG, "media send timeout without caption; treating as UNCERTAIN")
+            }
+            val msg = "UNCERTAIN:发送超时（${timeoutSec}s 未确认，请勿直接重试）"
+            SendCoordinator.onSendAttempted(false, msg)
+            return false to msg
         }
         return result to err
     }
@@ -199,16 +277,21 @@ class PollingForegroundService : Service() {
         )
     }
 
-    private fun buildNotification(on: Boolean): Notification {
+    private fun buildNotification(on: Boolean, vpnOk: Boolean = true): Notification {
         val open = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val text = when {
+            !on -> "OFF"
+            vpnOk -> "ON — polling jobs"
+            else -> "ON — VPN recovering"
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notif_title))
-            .setContentText(if (on) "ON — polling jobs" else "OFF")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentIntent(open)
             .setOngoing(true)

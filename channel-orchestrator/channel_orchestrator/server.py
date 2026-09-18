@@ -92,12 +92,28 @@ def channel_health() -> dict[str, Any]:
 
     wa_jobs = get_wa_queue().list_jobs()
     pending_wa = sum(1 for j in wa_jobs if j.get("status") in {"queued", "leased"})
+    google_ok = phone_hb.get("google_ok")
+    vpn_transport = phone_hb.get("vpn_transport")
+    wa_online = phone_online if google_ok is None else bool(phone_online and google_ok)
+    wa_detail = phone_hb.get("last_seen") or "no heartbeat"
+    extra_bits = []
+    if google_ok is not None:
+        extra_bits.append("google=" + ("ok" if google_ok else "fail"))
+    if vpn_transport is not None:
+        extra_bits.append("vpn=" + ("up" if vpn_transport else "down"))
+    if phone_hb.get("always_on_vpn") is False:
+        extra_bits.append("always-on off")
+    if extra_bits:
+        wa_detail = f"{wa_detail} · " + " ".join(extra_bits)
     wa = {
         "channel": "WHATSAPP",
-        "online": phone_online,
+        "online": wa_online,
         "phone_online": phone_online,
         "pending_jobs": pending_wa,
-        "detail": phone_hb.get("last_seen") or "no heartbeat",
+        "google_ok": google_ok,
+        "vpn_transport": vpn_transport,
+        "always_on_vpn": phone_hb.get("always_on_vpn"),
+        "detail": wa_detail,
     }
 
     email: dict[str, Any] = {"channel": "EMAIL", "online": False, "detail": ""}
@@ -208,6 +224,99 @@ async def whatsapp_webhook(
     )
 
 
+@app.post("/webhook/whatsapp/media")
+async def whatsapp_media_webhook(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Companion uploads inbound WA media; orch stores on S3 then Portal reply."""
+    _check_wa_token(authorization)
+    form = await request.form()
+    sender = str(form.get("from") or form.get("sender") or "").strip()
+    caption = str(form.get("body") or form.get("text") or form.get("caption") or "").strip()
+    media_type = str(form.get("media_type") or form.get("mediaType") or "file").strip().lower()
+    received_at = str(form.get("received_at") or "").strip() or None
+    message_id = str(form.get("message_id") or form.get("messageId") or "").strip() or None
+    upload = form.get("file")
+    if upload is None:
+        raise HTTPException(status_code=400, detail="file required")
+
+    filename = getattr(upload, "filename", None) or f"wa-{media_type}.bin"
+    content_type = getattr(upload, "content_type", None)
+    data = await upload.read()  # type: ignore[union-attr]
+    if not data:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    from .s3_media import S3Uploader, content_placeholder, media_type_normalize, mime_for_media_type
+
+    mtype = media_type_normalize(media_type) or "file"
+    ctype = content_type or mime_for_media_type(mtype, str(filename))
+    up = S3Uploader().upload_bytes(
+        data,
+        filename=str(filename),
+        content_type=ctype,
+        media_type=mtype,
+    )
+    if not up.get("ok"):
+        raise HTTPException(status_code=502, detail=up.get("error") or "s3 upload failed")
+
+    media_url = up.get("mediaUrl") or ""
+    caption_or_placeholder = caption or content_placeholder(mtype)
+    if media_url:
+        if not caption or caption_or_placeholder in {
+            "[image]", "[video]", "[audio]", "[file]", "[media]", f"[{mtype}]"
+        }:
+            body_content = media_url
+        elif media_url not in caption_or_placeholder:
+            body_content = f"{caption_or_placeholder}\n{media_url}"
+        else:
+            body_content = caption_or_placeholder
+    else:
+        body_content = caption_or_placeholder
+
+    normalized = {
+        "sender": sender,
+        "from": sender,
+        "body": body_content,
+        "message_id": message_id,
+        "received_at": received_at,
+        "media_url": media_url or None,
+        "media_type": mtype,
+        "media_content_type": up.get("contentType"),
+        "media_filename": up.get("filename"),
+    }
+    event = {
+        "id": str(uuid.uuid4()),
+        "channel": "WHATSAPP",
+        "received_at_host": _now_iso(),
+        "normalized": normalized,
+        "s3": {k: up.get(k) for k in ("mediaUrl", "s3Key", "s3Bucket", "size")},
+    }
+    INBOUND.append(event)
+    _append_log(event)
+    if seen_or_mark(
+        "WHATSAPP",
+        message_id,
+        body=f"{mtype}:{up.get('s3Key')}:{caption}",
+        sender=sender,
+    ):
+        touch_heartbeat("phone")
+        return JSONResponse(describe_skip("WHATSAPP", message_id))
+    result = handle_inbound_whatsapp(normalized)
+    touch_heartbeat("phone")
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": event["id"],
+            "matched": result.get("matched"),
+            "task_page_id": result.get("task_page_id"),
+            "mediaUrl": up.get("mediaUrl"),
+            "mediaType": mtype,
+            "webhook": result.get("webhook"),
+        }
+    )
+
+
 @app.get("/wa/jobs/next")
 def wa_job_next(authorization: str | None = Header(default=None)) -> JSONResponse:
     _check_wa_token(authorization)
@@ -215,7 +324,7 @@ def wa_job_next(authorization: str | None = Header(default=None)) -> JSONRespons
     job = get_wa_queue().next_job()
     if not job:
         return JSONResponse({"ok": True, "job": None})
-    # companion needs phone digits + text
+    # companion needs phone digits + text (+ optional media)
     return JSONResponse(
         {
             "ok": True,
@@ -224,6 +333,8 @@ def wa_job_next(authorization: str | None = Header(default=None)) -> JSONRespons
                 "phone": job.get("phone"),
                 "text": job.get("text"),
                 "task_id": job.get("task_id"),
+                "media_url": job.get("media_url"),
+                "media_type": job.get("media_type"),
             },
         }
     )
@@ -259,30 +370,48 @@ async def wa_job_enqueue(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    """Manual enqueue for ops/tests. Body: {phone, text, task_id?}."""
+    """Manual enqueue for ops/tests. Body: {phone, text?, media_url?, media_type?, task_id?}."""
     _check_wa_token(authorization)
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="expected json object")
     phone = str(body.get("phone") or "").strip()
     text = str(body.get("text") or "").strip()
-    if not phone or not text:
-        raise HTTPException(status_code=400, detail="phone and text required")
-    job = get_wa_queue().enqueue(
-        {
-            "phone": phone,
-            "text": text,
-            "task_id": body.get("task_id"),
-            "channel": "WHATSAPP",
-        }
-    )
+    media_url = str(body.get("media_url") or body.get("mediaUrl") or "").strip()
+    media_type = str(body.get("media_type") or body.get("mediaType") or "").strip().lower()
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone required")
+    if not text and not media_url:
+        raise HTTPException(status_code=400, detail="text or media_url required")
+    if media_url and media_type not in {"image", "video"}:
+        raise HTTPException(status_code=400, detail="media_type must be image|video when media_url set")
+    job_body: dict[str, Any] = {
+        "phone": phone,
+        "text": text,
+        "task_id": body.get("task_id"),
+        "channel": "WHATSAPP",
+    }
+    if media_url:
+        job_body["media_url"] = media_url
+        job_body["media_type"] = media_type
+    job = get_wa_queue().enqueue(job_body)
     return JSONResponse({"ok": True, "job": job})
 
 
 @app.post("/wa/heartbeat")
-def wa_heartbeat(authorization: str | None = Header(default=None)) -> JSONResponse:
+async def wa_heartbeat(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
     _check_wa_token(authorization)
-    touch_heartbeat("phone")
+    extra: dict[str, Any] = {}
+    try:
+        raw = await request.json()
+        if isinstance(raw, dict):
+            extra = raw
+    except Exception:  # noqa: BLE001
+        extra = {}
+    touch_heartbeat("phone", extra or None)
     return JSONResponse({"ok": True, "time": _now_iso()})
 
 
@@ -436,7 +565,7 @@ async function load() {
   document.getElementById('health').innerHTML = ['SMS','WHATSAPP','EMAIL'].map(name => {
     const c = ch[name] || {};
     const on = !!c.online;
-    return `<div class="card"><div><span class="dot ${on?'on':'off'}"></span><strong>${name}</strong> ${on?'在线':'离线'}</div><div class="detail">${c.detail || ''}${c.pending_jobs!=null?(' · pending jobs '+c.pending_jobs):''}</div></div>`;
+    return `<div class="card"><div><span class="dot ${on?'on':'off'}"></span><strong>${name}</strong> ${on?'在线':'离线'}</div><div class="detail">${c.detail || ''}${c.pending_jobs!=null?(' · pending jobs '+c.pending_jobs):''}${c.google_ok===false?' · Google 不通':''}${c.vpn_transport===false?' · VPN 隧道未起':''}</div></div>`;
   }).join('');
 
   const settings = data.settings || {};

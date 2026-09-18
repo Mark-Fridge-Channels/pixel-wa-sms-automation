@@ -103,6 +103,10 @@ def main() -> None:
 
     sub.add_parser("gmail-auth", help="One-time OAuth for Gmail mailbox (browser)")
     sub.add_parser("gmail-poll", help="Poll Gmail history once and ingest replies")
+    sub.add_parser(
+        "sync-client-domains",
+        help="Sync Follow-up Client → Client.Domain cache (full table)",
+    )
 
     args = parser.parse_args()
     client = SmsGatewayClient()
@@ -149,12 +153,19 @@ def main() -> None:
         if settings.gmail_user:
             print(f"GMAIL_USER={settings.gmail_user}")
         else:
-            print("GMAIL_USER=mark@fridgechannels.com")
+            print("GMAIL_USER=ella@fridgechannels.com")
         return
 
     if args.cmd == "gmail-poll":
         results = poll_gmail_inbound()
         print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+
+    if args.cmd == "sync-client-domains":
+        from .client_domain_cache import get_domain_cache
+
+        result = get_domain_cache().sync()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
     if args.cmd == "run-once":
@@ -175,9 +186,10 @@ def main() -> None:
         force = bool(args.force)
         last_gmail_poll = 0.0
         last_scan = 0.0
+        last_domain_sync = 0.0
 
         def tick(*, force_scan: bool = False) -> None:
-            nonlocal last_gmail_poll, last_scan
+            nonlocal last_gmail_poll, last_scan, last_domain_sync
             now_mono = time.time()
             scan_interval = get_scan_interval_seconds()
             do_scan = force_scan or args.once or (now_mono - last_scan >= scan_interval)
@@ -191,6 +203,22 @@ def main() -> None:
             if do_scan:
                 last_scan = now_mono
 
+            sync_every = max(60, int(settings.client_domain_sync_seconds or 0))
+            if (
+                settings.notion_token
+                and settings.notion_followup_client_ds
+                and not args.dry_run
+                and (force_scan or now_mono - last_domain_sync >= sync_every)
+            ):
+                last_domain_sync = now_mono
+                try:
+                    from .client_domain_cache import get_domain_cache
+
+                    sync_result = get_domain_cache().sync()
+                    out["client_domain_sync"] = sync_result
+                except Exception:  # noqa: BLE001
+                    log.exception("client domain sync failed")
+
             if settings.gmail_refresh_token and not args.dry_run:
                 if now_mono - last_gmail_poll >= max(5, settings.gmail_poll_seconds):
                     last_gmail_poll = now_mono
@@ -201,7 +229,12 @@ def main() -> None:
                     except Exception:  # noqa: BLE001
                         log.exception("gmail poll failed")
 
-            if out.get("enqueued") or out.get("results") or out.get("gmail_inbound"):
+            if (
+                out.get("enqueued")
+                or out.get("results")
+                or out.get("gmail_inbound")
+                or out.get("client_domain_sync")
+            ):
                 print(json.dumps(out, ensure_ascii=False, indent=2))
 
         if args.once:

@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from .config import settings
-from .email_util import normalize_email
+from .email_util import extract_emails_from_header_value, normalize_email
 from .email_classify import classify_inbound_email
 
 log = logging.getLogger(__name__)
@@ -293,8 +293,12 @@ class GmailClient:
             if h.get("name") and h.get("value")
         }
         from_raw = headers.get("from") or ""
+        to_raw = headers.get("to") or ""
+        cc_raw = headers.get("cc") or ""
         _, from_addr = parseaddr(from_raw)
         sender = normalize_email(from_addr) or normalize_email(from_raw)
+        to_emails = extract_emails_from_header_value(to_raw)
+        cc_emails = extract_emails_from_header_value(cc_raw)
         subject = headers.get("subject") or ""
         body = _extract_plain_body(payload)
         label_ids = msg.get("labelIds") or []
@@ -317,6 +321,10 @@ class GmailClient:
         return {
             "sender": sender,
             "from_raw": from_raw,
+            "to_raw": to_raw,
+            "cc_raw": cc_raw,
+            "to_emails": to_emails,
+            "cc_emails": cc_emails,
             "subject": subject,
             "body": body,
             "message_id": msg.get("id"),
@@ -407,7 +415,10 @@ def run_oauth_desktop_flow(
         "scope": " ".join(scopes),
         "access_type": "offline",
         "prompt": "consent",
+        "hd": "fridgechannels.com",
     }
+    if settings.gmail_user:
+        params["login_hint"] = settings.gmail_user
     auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
     server = HTTPServer(("127.0.0.1", 8765), Handler)
     print("Open this URL if browser did not open:\n", auth_url)

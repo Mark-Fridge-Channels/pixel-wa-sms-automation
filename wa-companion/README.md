@@ -20,6 +20,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 1. 打开 App：填服务器 `http://<host>:8787`、可选 API token（与 orchestrator `WA_API_TOKEN` 一致）  
 2. 打开 **无障碍**、**通知使用权**  
 3. 总开关 **ON** → 前台服务轮询  
+4. **VPN watchdog** 默认开：探活 Google + 系统 VPN 隧道；不通则自动：停青山 → 应用信息强制停止 → 再点 Start service。请保持无障碍开启，并在系统 VPN 里打开青山 **始终开启 VPN**。  
+5. 无障碍文案更新后，到设置里把 WA Companion **关再开一次**。  
 
 ## 与编排联调
 

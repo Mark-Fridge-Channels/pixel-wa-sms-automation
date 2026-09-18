@@ -52,6 +52,90 @@ def email_domain(email: str | None) -> str | None:
     return e.rsplit("@", 1)[-1].lower()
 
 
+def normalize_domain(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    s = str(raw).strip().lower()
+    s = re.sub(r"^https?://", "", s)
+    s = s.split("/")[0].split("?")[0].strip(".")
+    if s.startswith("www."):
+        s = s[4:]
+    if "@" in s:
+        s = s.rsplit("@", 1)[-1]
+    if not s or "." not in s:
+        return None
+    if not re.match(r"^[a-z0-9.\-]+\.[a-z]{2,}$", s):
+        return None
+    return s
+
+
+def parse_internal_domains(spec: str | None) -> set[str]:
+    if not spec or not str(spec).strip():
+        return {"fridgechannels.com"}
+    return {p.strip().lower() for p in str(spec).split(",") if p.strip()} or {"fridgechannels.com"}
+
+
+def extract_emails_from_header_value(raw: str | None) -> list[str]:
+    """Parse From/To/Cc header into normalized emails (order preserved, deduped)."""
+    if not raw:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    # Angle addresses and bare emails
+    for m in re.finditer(
+        r"(?:<)?([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})(?:>)?",
+        str(raw),
+        re.I,
+    ):
+        e = normalize_email(m.group(1))
+        if e and e not in seen:
+            seen.add(e)
+            found.append(e)
+    return found
+
+
+def collect_external_emails(
+    *,
+    from_header: str | None = None,
+    to_header: str | None = None,
+    cc_header: str | None = None,
+    from_email: str | None = None,
+    to_emails: list[str] | None = None,
+    cc_emails: list[str] | None = None,
+    internal_domains: set[str] | None = None,
+) -> list[str]:
+    """External addresses from To/Cc/From (exclude internal domains)."""
+    internal = internal_domains if internal_domains is not None else parse_internal_domains(None)
+    candidates: list[str] = []
+    if to_emails:
+        candidates.extend(to_emails)
+    else:
+        candidates.extend(extract_emails_from_header_value(to_header))
+    if cc_emails:
+        candidates.extend(cc_emails)
+    else:
+        candidates.extend(extract_emails_from_header_value(cc_header))
+    if from_email:
+        fe = normalize_email(from_email)
+        if fe:
+            candidates.append(fe)
+    else:
+        candidates.extend(extract_emails_from_header_value(from_header))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        e = normalize_email(raw)
+        if not e or e in seen:
+            continue
+        d = email_domain(e)
+        if d and (d in internal or any(d.endswith("." + i) for i in internal)):
+            continue
+        seen.add(e)
+        out.append(e)
+    return out
+
+
 def parse_public_domains(spec: str | None) -> set[str]:
     if not spec or not str(spec).strip():
         return set(DEFAULT_PUBLIC_DOMAINS)

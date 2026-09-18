@@ -236,6 +236,8 @@ flowchart TD
 
 Email 入站：优先按 `gmailThreadId` 挂原 Task；From≠出站收件人时见 [PLAN_EMAIL_PROXY_REPLY.md](./PLAN_EMAIL_PROXY_REPLY.md)（同公司 `proxyReply` / 跨域 `unexpectedSender`）。
 
+无 Task ready 时走冷进线 `POST /api/inbound`（Domain → `FollowUpClientId`），见 [PLAN_EMAIL_COLD_INBOUND.md](./PLAN_EMAIL_COLD_INBOUND.md)。
+
 详情：[PLAN_REPLY_INGEST.md](./PLAN_REPLY_INGEST.md) · [PLAN_EMAIL.md](./PLAN_EMAIL.md)
 
 ---

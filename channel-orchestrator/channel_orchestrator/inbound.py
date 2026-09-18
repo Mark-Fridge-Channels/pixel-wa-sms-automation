@@ -162,6 +162,12 @@ def handle_inbound_message(
     thread_id = matched.get("thread_id") if matched else None
     contact_id = matched.get("contact_page_id") if matched else None
     matched_flag = bool(task_id and thread_id)
+    media_url = normalized.get("media_url") or normalized.get("mediaUrl")
+    media_type = normalized.get("media_type") or normalized.get("mediaType")
+    media_content_type = normalized.get("media_content_type") or normalized.get("mediaContentType")
+    media_filename = normalized.get("media_filename") or normalized.get("mediaFilename")
+    if not body and media_type:
+        body = f"[{media_type}]"
 
     label = channel_display_name(ch)
     # Inbound listen: log + Portal callback only. Do NOT create Notion Conversation
@@ -174,7 +180,7 @@ def handle_inbound_message(
         )
 
     webhook_result: dict[str, Any]
-    if matched_flag and task_id and thread_id and body:
+    if matched_flag and task_id and thread_id and (body or media_url):
         if ch == "WHATSAPP":
             payload = reply_webhook.build_whatsapp_payload(
                 task_id=task_id,
@@ -183,6 +189,10 @@ def handle_inbound_message(
                 sender=party_key,
                 occurred_at=interaction_at,
                 whatsapp_conversation_id=f"whatsapp:{party_key}" if party_key else None,
+                media_url=str(media_url) if media_url else None,
+                media_type=str(media_type) if media_type else None,
+                media_content_type=str(media_content_type) if media_content_type else None,
+                media_filename=str(media_filename) if media_filename else None,
             )
         elif ch == "EMAIL":
             payload = reply_webhook.build_email_payload(
@@ -214,12 +224,35 @@ def handle_inbound_message(
                 sms_from=party_key,
             )
         webhook_result = reply_webhook.post_reply(payload)
+    elif ch == "EMAIL" and body:
+        # No Task ready → cold inbound (POST /api/inbound); ignore Gmail thread cache
+        from .email_cold_inbound import handle_email_cold_inbound
+
+        cold = handle_email_cold_inbound(normalized)
+        return {
+            "ok": cold.get("ok", True),
+            "matched": False,
+            "cold": True,
+            "task_page_id": None,
+            "thread_id": None,
+            "conversation_page_id": None,
+            "reply_meta": None,
+            "webhook": {"ok": True, "skipped": True, "reason": "cold_inbound"},
+            "cold_inbound": cold,
+            "event": cold.get("event")
+            or {
+                "channel": "Email",
+                "direction": "cold_inbound",
+                "matched": False,
+            },
+        }
     else:
         log.info(
-            "inbound unmatched or incomplete channel=%s party=%s has_body=%s",
+            "inbound unmatched or incomplete channel=%s party=%s has_body=%s has_media=%s",
             label,
             party_key or sender_raw,
             bool(body),
+            bool(media_url),
         )
         webhook_result = {
             "ok": True,

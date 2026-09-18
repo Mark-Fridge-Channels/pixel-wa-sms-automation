@@ -204,7 +204,11 @@ def enqueue_whatsapp_job(
                 cache.mark_failed(resolved.phone_e164)
         return {"ok": False, "status": "failed", "reason": resolved.resolve_error, "task_id": resolved.task_id}
 
-    assert resolved.phone_e164 and resolved.content and resolved.conversation_id and resolved.thread_id
+    assert resolved.phone_e164 and resolved.conversation_id and resolved.thread_id
+    media_url = str((resolved.extended_parameters or {}).get("mediaUrl") or "").strip()
+    media_type = str((resolved.extended_parameters or {}).get("mediaType") or "").strip().lower()
+    if not resolved.content and not media_url:
+        raise AssertionError("WA job requires content or mediaUrl")
 
     if dry_run:
         return {
@@ -214,6 +218,8 @@ def enqueue_whatsapp_job(
             "phone": resolved.phone_e164,
             "thread_id": resolved.thread_id,
             "content": resolved.content,
+            "media_url": media_url or None,
+            "media_type": media_type or None,
             "channel": "WHATSAPP",
         }
 
@@ -234,17 +240,19 @@ def enqueue_whatsapp_job(
         sent_at=now,
     )
     notion.update_task_status(resolved.task_id, "In Progress")
-    job = queue.enqueue(
-        {
-            "task_id": resolved.task_id,
-            "contact_id": resolved.contact_id,
-            "conversation_id": resolved.conversation_id,
-            "thread_id": resolved.thread_id,
-            "phone": resolved.phone_e164,
-            "text": resolved.content,
-            "channel": "WHATSAPP",
-        }
-    )
+    job_body: dict[str, Any] = {
+        "task_id": resolved.task_id,
+        "contact_id": resolved.contact_id,
+        "conversation_id": resolved.conversation_id,
+        "thread_id": resolved.thread_id,
+        "phone": resolved.phone_e164,
+        "text": resolved.content or "",
+        "channel": "WHATSAPP",
+    }
+    if media_url and media_type in {"image", "video"}:
+        job_body["media_url"] = media_url
+        job_body["media_type"] = media_type
+    job = queue.enqueue(job_body)
     return {
         "ok": True,
         "status": "queued",
@@ -252,6 +260,8 @@ def enqueue_whatsapp_job(
         "job_id": job["id"],
         "phone": resolved.phone_e164,
         "thread_id": resolved.thread_id,
+        "media_url": media_url or None,
+        "media_type": media_type or None,
         "channel": "WHATSAPP",
     }
 

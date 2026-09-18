@@ -332,11 +332,26 @@ class NotionClient:
             subject = rich_text_plain(cp.get("Subject")) or None
             if not subject and channel == "EMAIL":
                 subject = title
-            extended = parse_extended_parameters(cp.get("Extended Parameters"))
-            if not content:
+            # Conversation Extended Parameters (TaskDB currently has no such property;
+            # if Task later gains it, task values override conversation).
+            conv_ext = parse_extended_parameters(cp.get("Extended Parameters"))
+            task_ext = parse_extended_parameters(p.get("Extended Parameters"))
+            extended = {**conv_ext, **task_ext}
+            media_url = str(extended.get("mediaUrl") or extended.get("media_url") or "").strip()
+            media_type = str(extended.get("mediaType") or extended.get("media_type") or "").strip().lower()
+            has_media = bool(media_url) and media_type in {"image", "video"}
+            if not content and not has_media:
                 error = (error + "；" if error else "") + "Conversation Content 为空"
+            if not content and has_media:
+                content = ""  # caption optional when sending image/video
             if not thread_id:
                 error = (error + "；" if error else "") + "Conversation 缺少 Thread ID（须由 Task/Conversation 携带，不可本地生成）"
+            if media_url and media_type and media_type not in {"image", "video"}:
+                error = (error + "；" if error else "") + (
+                    f"出站媒体仅支持 image|video，当前 mediaType={media_type!r}"
+                )
+            if media_type in {"image", "video"} and not media_url:
+                error = (error + "；" if error else "") + "mediaType 已设但缺少 mediaUrl"
 
         return ResolvedTask(
             task_id=task_id,

@@ -3,22 +3,39 @@ from __future__ import annotations
 import json
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .config import settings
 
+_lock = threading.Lock()
+_VPN_KEYS = (
+    "vpn_transport",
+    "google_ok",
+    "orch_ok",
+    "always_on_vpn",
+    "vpn_recovered",
+    "vpn_detail",
+)
 
-def touch_heartbeat(device: str = "phone") -> None:
+
+def touch_heartbeat(device: str = "phone", extra: dict[str, Any] | None = None) -> None:
     path = settings.resolved_data_dir() / "device_heartbeat.json"
-    data: dict[str, Any] = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            data = {}
-    data[device] = {"last_seen": datetime.now(timezone.utc).isoformat()}
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    with _lock:
+        data: dict[str, Any] = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}
+        prev = data.get(device)
+        row: dict[str, Any] = dict(prev) if isinstance(prev, dict) else {}
+        row["last_seen"] = datetime.now(timezone.utc).isoformat()
+        if extra:
+            for key in _VPN_KEYS:
+                if key in extra:
+                    row[key] = extra[key]
+        data[device] = row
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def read_heartbeat() -> dict[str, Any]:

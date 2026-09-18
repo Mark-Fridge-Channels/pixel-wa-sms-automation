@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">WA Companion</string>
-    <string name="accessibility_description">Automates tapping Send in WhatsApp for orchestrated outreach jobs.</string>
+    <string name="accessibility_description">Automates WhatsApp send taps and reconnects 青山 VPN when the tunnel is down.</string>
     <string name="notif_channel">wa_companion</string>
     <string name="notif_title">WA automation</string>
 </resources>

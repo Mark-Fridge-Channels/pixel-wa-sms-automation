@@ -32,6 +32,9 @@ python -m channel_orchestrator.cli plan-today --channel SMS
 # Gmail 一次性授权（浏览器登录业务邮箱）
 python -m channel_orchestrator.cli gmail-auth
 python -m channel_orchestrator.cli gmail-poll
+
+# Follow-up Client Domain 缓存（冷进线）
+python -m channel_orchestrator.cli sync-client-domains
 ```
 
 ## 监控
@@ -39,7 +42,7 @@ python -m channel_orchestrator.cli gmail-poll
 浏览器打开 `https://orch.fcconnect.co/monitor`（或本机 `http://127.0.0.1:8787/monitor`）：
 
 - 今日领取 / 执行 / 成功 / 失败
-- SMS / WhatsApp / Email 在线健康
+- SMS / WhatsApp / Email 在线健康（WhatsApp 会显示 `google=` / `vpn=` 若 Companion 已上报）
 - 调整扫描间隔与 SMS/WA 发送间隔（需 `MONITOR_TOKEN` 或 `WA_API_TOKEN`）
 
 ## WhatsApp API（Companion 轮询）

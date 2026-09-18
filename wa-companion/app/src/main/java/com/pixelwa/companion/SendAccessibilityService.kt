@@ -1,10 +1,16 @@
 package com.pixelwa.companion
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
 import android.os.Bundle
+import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -43,21 +49,49 @@ class SendAccessibilityService : AccessibilityService() {
         }
 
         if (clickSend(root)) {
-            Log.i(TAG, "send button clicked")
-            armed.set(false)
-            SendCoordinator.onSendAttempted(true, null)
+            val stillMediaComposer = !root
+                .findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption_input")
+                .isNullOrEmpty() ||
+                !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption")
+                    .isNullOrEmpty()
+            if (stillMediaComposer) {
+                Log.i(TAG, "send clicked but media composer still open; wait")
+            } else {
+                Log.i(TAG, "send button clicked")
+                armed.set(false)
+                SendCoordinator.onSendAttempted(true, null)
+            }
         }
     }
 
     override fun onInterrupt() {}
 
     private fun dismissGateDialogs(root: AccessibilityNodeInfo) {
+        // Share-confirm dialog: "Share with +86 …?" → OK
+        val button1 = root.findAccessibilityNodeInfosByViewId("android:id/button1")
+        if (!button1.isNullOrEmpty()) {
+            val msg = root.findAccessibilityNodeInfosByViewId("android:id/message")
+                ?.firstOrNull()?.text?.toString().orEmpty()
+            if (msg.contains("Share with", ignoreCase = true) ||
+                msg.contains("分享给", ignoreCase = true)
+            ) {
+                val n = button1[0]
+                if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    Log.i(TAG, "clicked Share-with OK")
+                    return
+                }
+                n.parent?.takeIf { it.isClickable }?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                Log.i(TAG, "clicked Share-with OK via parent")
+                return
+            }
+        }
         // New-number / first-chat confirmations
-        for (label in listOf("Continue to Chat", "Continue to chat", "OK")) {
+        for (label in listOf("Continue to Chat", "Continue to chat", "OK", "确定")) {
             val nodes = root.findAccessibilityNodeInfosByText(label) ?: continue
             for (n in nodes) {
                 if (n.isClickable) {
                     n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    Log.i(TAG, "dismissed gate: $label")
                     return
                 }
                 n.parent?.takeIf { it.isClickable }?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -135,6 +169,10 @@ class SendAccessibilityService : AccessibilityService() {
             val nodes = root.findAccessibilityNodeInfosByViewId(id)
             if (!nodes.isNullOrEmpty()) {
                 val n = nodes[0]
+                if (!n.isEnabled) {
+                    Log.i(TAG, "send node $id not enabled yet")
+                    continue
+                }
                 if (n.isClickable) {
                     n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     return true
@@ -229,6 +267,199 @@ class SendAccessibilityService : AccessibilityService() {
             }
         }
 
+        fun isBound(): Boolean = instance != null
+
+        fun goHome() {
+            val svc = instance ?: return
+            svc.tickHandler.post {
+                try {
+                    svc.performGlobalAction(GLOBAL_ACTION_HOME)
+                } catch (e: Exception) {
+                    Log.w(TAG, "HOME failed", e)
+                }
+            }
+        }
+
+        fun qingshanConnectLabel(): String? {
+            return onMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@onMain false
+                if (root.packageName?.toString() != "com.wieifjyr.qs2") return@onMain false
+                val nodes = root.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/tv_connect_status")
+                val label = nodes?.firstOrNull()?.text?.toString()?.trim().orEmpty()
+                lastQingshanLabel = label
+                label.isNotEmpty()
+            }.let { if (it) lastQingshanLabel else null }
+        }
+
+        @Volatile
+        private var lastQingshanLabel: String? = null
+
+        fun hasQingshanConnectCard(): Boolean {
+            return onMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@onMain false
+                if (root.packageName?.toString() != "com.wieifjyr.qs2") return@onMain false
+                !root.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/btn_connect_card").isNullOrEmpty()
+            }
+        }
+
+        fun clickQingshanStopIfConnected(): Boolean {
+            val label = qingshanConnectLabel().orEmpty()
+            Log.i(TAG, "qingshan status=$label")
+            if (label == "连接" || label.equals("Connect", ignoreCase = true)) {
+                return false
+            }
+            if (label.contains("已连接") || label.contains("断开") ||
+                label.contains("连接中") || label.contains("Connected", ignoreCase = true)
+            ) {
+                return clickViewId("com.wieifjyr.qs2:id/btn_connect_card")
+            }
+            return clickViewId("com.wieifjyr.qs2:id/fab", requireDescContains = "Stop") ||
+                clickDescOrText("com.wieifjyr.qs2", "Stop service")
+        }
+
+        fun clickQingshanStart(): Boolean {
+            dismissPermissionDialogs()
+            val label = qingshanConnectLabel().orEmpty()
+            Log.i(TAG, "qingshan start status=$label")
+            if (clickViewId("com.wieifjyr.qs2:id/btn_connect_card")) return true
+            if (label == "连接" && clickDescOrText("com.wieifjyr.qs2", "连接")) return true
+            return clickViewId("com.wieifjyr.qs2:id/fab", requireDescContains = "Start") ||
+                clickDescOrText("com.wieifjyr.qs2", "Start service")
+        }
+
+        fun dismissPermissionDialogs(): Boolean {
+            return clickDescOrText(
+                null,
+                "Allow",
+                "ALLOW",
+                "允许",
+                "始终允许",
+            )
+        }
+
+        fun confirmVpnPrepareDialog(): Boolean {
+            return clickDescOrText(
+                "com.android.vpndialogs",
+                "OK",
+                "Allow",
+                "确定",
+                "允许",
+            ) || clickDescOrText(null, "OK", "Allow", "确定")
+        }
+
+        fun forceStopCurrentApp(): Boolean {
+            val clicked = clickDescOrText(
+                "com.android.settings",
+                "Force stop",
+                "FORCE STOP",
+                "强制停止",
+            )
+            if (!clicked) return false
+            try {
+                Thread.sleep(400)
+            } catch (_: InterruptedException) {
+                // ignore
+            }
+            clickDescOrText(null, "OK", "Force stop", "FORCE STOP", "确定", "强制停止")
+            return true
+        }
+
+        private fun clickViewId(viewId: String, requireDescContains: String? = null): Boolean {
+            return onMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@onMain false
+                val nodes = root.findAccessibilityNodeInfosByViewId(viewId) ?: return@onMain false
+                for (n in nodes) {
+                    val desc = n.contentDescription?.toString().orEmpty()
+                    if (requireDescContains != null &&
+                        !desc.contains(requireDescContains, ignoreCase = true)
+                    ) {
+                        continue
+                    }
+                    if (clickNode(svc, n)) return@onMain true
+                }
+                false
+            }
+        }
+
+        private fun clickDescOrText(packageName: String?, vararg labels: String): Boolean {
+            return onMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@onMain false
+                val pkg = root.packageName?.toString()
+                if (packageName != null && pkg != packageName) return@onMain false
+                for (label in labels) {
+                    val nodes = root.findAccessibilityNodeInfosByText(label) ?: continue
+                    for (n in nodes) {
+                        val t = n.text?.toString().orEmpty()
+                        val d = n.contentDescription?.toString().orEmpty()
+                        if (!t.equals(label, ignoreCase = true) &&
+                            !d.equals(label, ignoreCase = true) &&
+                            !t.contains(label, ignoreCase = true) &&
+                            !d.contains(label, ignoreCase = true)
+                        ) {
+                            continue
+                        }
+                        if (clickNode(svc, n)) return@onMain true
+                    }
+                }
+                false
+            }
+        }
+
+        private fun clickNode(svc: SendAccessibilityService, n: AccessibilityNodeInfo): Boolean {
+            if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            var p = n.parent
+            var depth = 0
+            while (p != null && depth < 8) {
+                if (p.isClickable && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    return true
+                }
+                p = p.parent
+                depth++
+            }
+            return tapNode(svc, n)
+        }
+
+        private fun tapNode(svc: SendAccessibilityService, n: AccessibilityNodeInfo): Boolean {
+            val r = Rect()
+            n.getBoundsInScreen(r)
+            if (r.width() < 2 || r.height() < 2) return false
+            val path = Path()
+            path.moveTo(r.exactCenterX(), r.exactCenterY())
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+                .build()
+            return svc.dispatchGesture(gesture, null, null)
+        }
+
+        private fun onMain(timeoutMs: Long, block: (SendAccessibilityService) -> Boolean): Boolean {
+            val svc = instance ?: return false
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                return try {
+                    block(svc)
+                } catch (e: Exception) {
+                    Log.w(TAG, "a11y action failed", e)
+                    false
+                }
+            }
+            val latch = CountDownLatch(1)
+            var result = false
+            svc.tickHandler.post {
+                result = try {
+                    block(svc)
+                } catch (e: Exception) {
+                    Log.w(TAG, "a11y action failed", e)
+                    false
+                }
+                latch.countDown()
+            }
+            return try {
+                latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+                result
+            } catch (_: InterruptedException) {
+                false
+            }
+        }
+
         /** Leave open chat so WhatsApp is not stuck on the conversation screen. */
         fun leaveChatToList() {
             val svc = instance ?: return
@@ -290,10 +521,21 @@ class SendAccessibilityService : AccessibilityService() {
                     val want = SendCoordinator.pendingText
                     if (!want.isNullOrBlank()) ensureComposerText(root, want)
                     if (clickSend(root)) {
-                        Log.i(TAG, "send button clicked (tick)")
-                        armed.set(false)
-                        SendCoordinator.onSendAttempted(true, null)
-                        return
+                        // Media composer: first click may no-op while preview loads; only
+                        // finish once caption editor is gone (or plain chat send).
+                        val stillMediaComposer = !root
+                            .findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption_input")
+                            .isNullOrEmpty() ||
+                            !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption")
+                                .isNullOrEmpty()
+                        if (stillMediaComposer) {
+                            Log.i(TAG, "send clicked but media composer still open; retry")
+                        } else {
+                            Log.i(TAG, "send button clicked (tick)")
+                            armed.set(false)
+                            SendCoordinator.onSendAttempted(true, null)
+                            return
+                        }
                     }
                 }
             } catch (e: Exception) {

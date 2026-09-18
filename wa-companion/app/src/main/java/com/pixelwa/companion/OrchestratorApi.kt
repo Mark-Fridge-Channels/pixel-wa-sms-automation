@@ -12,7 +12,12 @@ data class WaJob(
     val phone: String,
     val text: String,
     val taskId: String? = null,
-)
+    val mediaUrl: String? = null,
+    val mediaType: String? = null,
+) {
+    val hasMedia: Boolean
+        get() = !mediaUrl.isNullOrBlank() && mediaType in setOf("image", "video")
+}
 
 class OrchestratorApi(private val prefs: Prefs) {
     private val client = OkHttpClient.Builder()
@@ -28,9 +33,21 @@ class OrchestratorApi(private val prefs: Prefs) {
         return builder
     }
 
-    fun heartbeat(): Boolean {
+    fun heartbeat(vpn: VpnSnapshot? = null): Boolean {
+        val body = if (vpn == null) {
+            ByteArray(0).toRequestBody(null)
+        } else {
+            val json = JSONObject()
+                .put("vpn_transport", vpn.vpnTransport)
+                .put("google_ok", vpn.googleOk)
+                .put("orch_ok", vpn.orchOk)
+                .put("always_on_vpn", vpn.alwaysOn)
+                .put("vpn_recovered", vpn.recovered)
+                .put("vpn_detail", vpn.detail)
+            json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        }
         val req = authHeaders(
-            Request.Builder().url("${prefs.serverBaseUrl}/wa/heartbeat").post(ByteArray(0).toRequestBody(null))
+            Request.Builder().url("${prefs.serverBaseUrl}/wa/heartbeat").post(body)
         ).build()
         client.newCall(req).execute().use { return it.isSuccessful }
     }
@@ -48,7 +65,16 @@ class OrchestratorApi(private val prefs: Prefs) {
             val phone = job.optString("phone")
             val text = job.optString("text")
             if (id.isBlank() || phone.isBlank()) return null
-            return WaJob(id, phone, text, job.optString("task_id").ifBlank { null })
+            val mediaUrl = job.optString("media_url").ifBlank { null }
+            val mediaType = job.optString("media_type").ifBlank { null }
+            return WaJob(
+                id = id,
+                phone = phone,
+                text = text,
+                taskId = job.optString("task_id").ifBlank { null },
+                mediaUrl = mediaUrl,
+                mediaType = mediaType,
+            )
         }
     }
 

@@ -285,7 +285,8 @@ def test_inbound_unmatched(tmp_path, monkeypatch):
     wh.post_reply.assert_not_called()
 
 
-def test_inbound_pending_does_not_reply(tmp_path, monkeypatch):
+def test_inbound_pending_still_matches_reply(tmp_path, monkeypatch):
+    """Pending is matchable (WA replies during send / legacy rows)."""
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     cache = OutboundCache(channel="SMS", path=tmp_path / "c.json")
     cache.set_pending(
@@ -296,15 +297,17 @@ def test_inbound_pending_does_not_reply(tmp_path, monkeypatch):
         conversation_page_id="v1",
     )
     wh = MagicMock()
+    wh.build_sms_payload.return_value = {"channel": "SMS"}
+    wh.post_reply.return_value = {"ok": True}
     result = handle_inbound_sms(
-        {"sender": "+15551212121", "body": "too early"},
+        {"sender": "+15551212121", "body": "during send"},
         notion=MagicMock(),
         cache=cache,
         reply_webhook=wh,
         write_notion=False,
     )
-    assert result["matched"] is False
-    wh.post_reply.assert_not_called()
+    assert result["matched"] is True
+    wh.post_reply.assert_called_once()
 
 
 def test_same_phone_cache_overwrites(tmp_path, monkeypatch):
@@ -429,6 +432,38 @@ def test_reply_webhook_forces_empty_message_id(monkeypatch):
     result = client.post_reply({**payload, "messageId": "must-be-cleared"})
     assert result["skipped"] is True
     assert result["reason"] == "no_url"
+
+
+def test_reply_webhook_whatsapp_media_extended():
+    from channel_orchestrator.reply_webhook import ReplyWebhookClient
+
+    client = ReplyWebhookClient()
+    payload = client.build_whatsapp_payload(
+        task_id="t-wa",
+        thread_id="THR-wa",
+        content="",
+        sender="+15551212",
+        occurred_at="2026-09-17T12:00:00Z",
+        media_url="https://cdn.example.com/wa-inbound/image/a.jpg",
+        media_type="image",
+        media_content_type="image/jpeg",
+        media_filename="a.jpg",
+    )
+    assert payload["content"] == "https://cdn.example.com/wa-inbound/image/a.jpg"
+    assert payload["extendedParameters"]["mediaUrl"].endswith("a.jpg")
+    assert payload["extendedParameters"]["mediaType"] == "image"
+    assert payload["extendedParameters"]["mediaFilename"] == "a.jpg"
+
+    with_caption = client.build_whatsapp_payload(
+        task_id="t-wa",
+        thread_id="THR-wa",
+        content="look at this",
+        sender="+15551212",
+        occurred_at="2026-09-17T12:00:00Z",
+        media_url="https://cdn.example.com/wa-inbound/image/a.jpg",
+        media_type="image",
+    )
+    assert with_caption["content"] == "look at this\nhttps://cdn.example.com/wa-inbound/image/a.jpg"
 
 
 def test_filter_query_shape_documented():
@@ -743,6 +778,13 @@ def test_email_same_domain_without_thread_does_not_match(tmp_path, monkeypatch):
         extra={"gmail_thread_id": "gt-only"},
     )
     wh = MagicMock()
+    # Avoid real /api/inbound; cold path is covered in test_email_cold_inbound.py
+    portal = MagicMock()
+    portal.post_inbound.return_value = {"ok": True, "skipped": True}
+    monkeypatch.setattr(
+        "channel_orchestrator.email_cold_inbound.InboundPortalClient",
+        lambda: portal,
+    )
     result = handle_inbound_email(
         {
             "sender": "b@acme.com",
@@ -756,3 +798,5 @@ def test_email_same_domain_without_thread_does_not_match(tmp_path, monkeypatch):
     )
     assert result["matched"] is False
     wh.post_reply.assert_not_called()
+    assert result.get("cold") is True
+    portal.post_inbound.assert_called()

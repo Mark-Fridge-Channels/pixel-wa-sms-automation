@@ -39,6 +39,13 @@
         android:layout_marginTop="16dp"
         android:text="Automation ON" />
 
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/vpnWatchdogSwitch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="VPN watchdog (auto reconnect 青山)" />
+
     <Button
         android:id="@+id/saveBtn"
         android:layout_width="match_parent"
@@ -57,6 +64,12 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Open Notification access" />
+
+    <Button
+        android:id="@+id/openStorage"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Open All-files access (media)" />
 
     <TextView
         android:id="@+id/statusText"

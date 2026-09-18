@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     notion_contact_ds: str = "e9fce670-c858-4ab2-9d50-fd196b64f8ed"
     notion_keyperson_ds: str = "cd09166f-d9fd-836c-864b-073b80032dce"
     notion_conversation_db: str = "a7ded397b23f47f1a9113855fc3d10ce"
+    # FC3.0-Follow-up-ClientDB (Domain via Client relation)
+    notion_followup_client_ds: str = "9a07646d-190c-4346-9ab6-96c2e40d66a7"
 
     sms_gateway_url: str = "http://127.0.0.1:8080"
     sms_gateway_user: str = ""
@@ -23,7 +25,7 @@ class Settings(BaseSettings):
     sms_sim_number: int = 2
 
     webhook_base: str = "http://127.0.0.1:8787"
-    saily_phone_e164: str = "+17794362345"
+    saily_phone_e164: str = "+16208941711"
 
     timezone: str = "America/New_York"
     # Legacy (daily-plan era). Outbound scan no longer gates on work windows.
@@ -47,6 +49,8 @@ class Settings(BaseSettings):
 
     reply_webhook_url: str = ""
     reply_webhook_token: str = ""
+    # Cold inbound (no Task): POST /api/inbound. Empty → derive from reply_webhook_url.
+    inbound_webhook_url: str = "https://followup-portal.fridgechannels.com/api/inbound"
     wa_api_token: str = ""
     # Optional; falls back to wa_api_token for /api/monitor/settings
     monitor_token: str = ""
@@ -58,8 +62,21 @@ class Settings(BaseSettings):
     gmail_poll_seconds: int = 30
     # Comma-separated; empty = built-in public mailbox list
     email_public_domains: str = ""
+    # Own / colleague domains excluded from cold-inbound external address set
+    email_internal_domains: str = "fridgechannels.com"
     # Same Gmail thread but From domain ≠ outbound: still accept replies (flag unexpectedSender)
     email_allow_cross_domain_thread_reply: bool = True
+    # Full-table Follow-up Client → Domain cache refresh interval
+    client_domain_sync_seconds: int = 3600
+
+    # S3 for inbound WhatsApp media (image/video/audio/file) → Portal mediaUrl
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-east-1"
+    s3_bucket: str = ""
+    s3_prefix: str = "wa-inbound"
+    # Optional CDN / public base, e.g. https://cdn.example.com — else virtual-hosted S3 URL
+    s3_public_base_url: str = ""
 
     data_dir: str = ""
 
