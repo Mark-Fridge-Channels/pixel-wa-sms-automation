@@ -68,11 +68,18 @@ flowchart TD
 | 模块 | 作用 |
 |---|---|
 | `client_domain_cache` | 全表同步 `data/followup_client_domains.json` |
-| `inbound_portal` | `POST /api/inbound`（永不带 `taskId`） |
-| `email_cold_inbound` | 外部址 + Domain 命中 → 多次 inbound |
+| `inbound_portal` | `POST /api/inbound`（永不带 `taskId`；带 `extendedParameters.gmailThreadId`） |
+| `email_cold_inbound` | 外部址 + Domain 命中 → 多次 inbound；成功后补写 Conversation Extended Parameters |
 | `inbound` | Task miss 且有 body → 冷进线 |
 | `gmail_client.parse_inbound_message` | 解析 To/Cc |
 | CLI `sync-client-domains` | 手动同步；`run-scheduler` 按 `CLIENT_DOMAIN_SYNC_SECONDS` 定时 |
+
+## gmailThreadId（跟帖必需）
+
+冷进线写入 Conversation 时必须带上当前邮件的 Gmail 线程，否则后续 Reply Task 出站会当成新开线程：
+
+1. `POST /api/inbound` 的 `extendedParameters.gmailThreadId` / `gmailMessageId`
+2. 若响应有 `conversationId`，再 `Notion.update_conversation_extended_parameters` 兜底合并写入
 
 ## 配置
 

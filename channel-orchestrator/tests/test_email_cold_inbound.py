@@ -76,7 +76,10 @@ def test_inbound_portal_payload_with_client(monkeypatch):
 
     class FakeResp:
         status_code = 200
-        text = '{"ok":true}'
+        text = '{"ok":true,"conversationId":"conv-1"}'
+
+        def json(self):
+            return {"ok": True, "conversationId": "conv-1"}
 
     class FakeHttp:
         def __init__(self, *a, **k):
@@ -103,8 +106,13 @@ def test_inbound_portal_payload_with_client(monkeypatch):
         sender="buyer@acme.com",
         subject="Magnet",
         followup_client_id="fc-page-1",
+        extended_parameters={
+            "gmailThreadId": "gt-99",
+            "gmailMessageId": "gm-99",
+        },
     )
     assert result["ok"] is True
+    assert result["conversation_id"] == "conv-1"
     assert captured["url"].endswith("/api/inbound")
     assert captured["json"] == {
         "channel": "Email",
@@ -112,6 +120,10 @@ def test_inbound_portal_payload_with_client(monkeypatch):
         "sender": "buyer@acme.com",
         "object": "Magnet",
         "FollowUpClientId": "fc-page-1",
+        "extendedParameters": {
+            "gmailThreadId": "gt-99",
+            "gmailMessageId": "gm-99",
+        },
     }
     assert "taskId" not in captured["json"]
 
@@ -128,6 +140,9 @@ def test_inbound_portal_sender_only(monkeypatch):
     class FakeResp:
         status_code = 200
         text = "ok"
+
+        def json(self):
+            raise ValueError("not json")
 
     class FakeHttp:
         def __init__(self, *a, **k):
@@ -161,6 +176,7 @@ def test_cold_inbound_multi_client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     monkeypatch.setattr(settings, "email_internal_domains", "fridgechannels.com")
+    monkeypatch.setattr(settings, "notion_token", "")
     cache = FollowUpClientDomainCache(path=tmp_path / "d.json")
     cache._data = {
         "by_domain": {"acme.com": ["fc-a", "fc-b"]},
@@ -168,7 +184,11 @@ def test_cold_inbound_multi_client(tmp_path, monkeypatch):
         "updated_at": None,
     }
     portal = MagicMock()
-    portal.post_inbound.return_value = {"ok": True}
+    portal.post_inbound.return_value = {
+        "ok": True,
+        "conversation_id": "conv-x",
+        "response": {"conversationId": "conv-x"},
+    }
     result = handle_email_cold_inbound(
         {
             "sender": "buyer@acme.com",
@@ -176,6 +196,8 @@ def test_cold_inbound_multi_client(tmp_path, monkeypatch):
             "body": "We need magnets",
             "to_emails": ["ella@fridgechannels.com"],
             "cc_emails": [],
+            "gmail_thread_id": "gt-cold",
+            "gmail_message_id": "gm-cold",
         },
         portal=portal,
         domain_cache=cache,
@@ -187,12 +209,49 @@ def test_cold_inbound_multi_client(tmp_path, monkeypatch):
         for c in portal.post_inbound.call_args_list
     }
     assert ids == {"fc-a", "fc-b"}
+    for c in portal.post_inbound.call_args_list:
+        assert c.kwargs["extended_parameters"] == {
+            "gmailThreadId": "gt-cold",
+            "gmailMessageId": "gm-cold",
+        }
+
+
+def test_cold_inbound_writes_extended_on_conversation(tmp_path, monkeypatch):
+    from channel_orchestrator.email_cold_inbound import handle_email_cold_inbound
+
+    monkeypatch.setattr(settings, "email_internal_domains", "fridgechannels.com")
+    monkeypatch.setattr(settings, "notion_token", "secret")
+    portal = MagicMock()
+    portal.post_inbound.return_value = {
+        "ok": True,
+        "conversation_id": "conv-99",
+        "response": {"conversationId": "conv-99"},
+    }
+    notion = MagicMock()
+    handle_email_cold_inbound(
+        {
+            "sender": "buyer@acme.com",
+            "subject": "Hi",
+            "body": "hello",
+            "to_emails": ["ella@fridgechannels.com"],
+            "gmail_thread_id": "gt-1",
+            "gmail_message_id": "gm-1",
+        },
+        portal=portal,
+        domain_cache=FollowUpClientDomainCache(path=tmp_path / "d.json"),
+        notion=notion,
+    )
+    notion.update_conversation_extended_parameters.assert_called_once_with(
+        "conv-99",
+        {"gmailThreadId": "gt-1", "gmailMessageId": "gm-1"},
+    )
 
 
 def test_cold_inbound_public_domain_sender_only(tmp_path, monkeypatch):
     from channel_orchestrator.email_cold_inbound import handle_email_cold_inbound
 
     monkeypatch.setattr(settings, "email_internal_domains", "fridgechannels.com")
+    monkeypatch.setattr(settings, "notion_token", "")
     cache = FollowUpClientDomainCache(path=tmp_path / "d.json")
     cache._data = {"by_domain": {"acme.com": ["fc-a"]}, "pages": {}, "updated_at": None}
     portal = MagicMock()
@@ -203,6 +262,7 @@ def test_cold_inbound_public_domain_sender_only(tmp_path, monkeypatch):
             "subject": "Hi",
             "body": "hello",
             "to_emails": ["ella@fridgechannels.com"],
+            "gmail_thread_id": "gt-g",
         },
         portal=portal,
         domain_cache=cache,
@@ -210,6 +270,7 @@ def test_cold_inbound_public_domain_sender_only(tmp_path, monkeypatch):
     assert portal.post_inbound.call_count == 1
     assert portal.post_inbound.call_args.kwargs["followup_client_id"] is None
     assert portal.post_inbound.call_args.kwargs["sender"] == "person@gmail.com"
+    assert portal.post_inbound.call_args.kwargs["extended_parameters"]["gmailThreadId"] == "gt-g"
     assert result["calls"][0]["FollowUpClientId"] is None
 
 

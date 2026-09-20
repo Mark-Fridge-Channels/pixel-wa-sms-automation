@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -35,6 +36,7 @@ class InboundPortalClient:
         sender: str,
         subject: str | None = None,
         followup_client_id: str | None = None,
+        extended_parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.url:
             log.info("INBOUND_WEBHOOK_URL empty; skip inbound sender=%s", sender)
@@ -56,9 +58,12 @@ class InboundPortalClient:
             body["object"] = subject
         if followup_client_id:
             body["FollowUpClientId"] = followup_client_id
+        if extended_parameters:
+            ext = {k: v for k, v in extended_parameters.items() if v is not None and v != ""}
+            if ext:
+                body["extendedParameters"] = ext
         # Never send taskId on cold inbound
-        if "taskId" in body:
-            del body["taskId"]
+        body.pop("taskId", None)
 
         if not body["sender"] or (channel != "Phone" and not body["content"]):
             return {
@@ -75,12 +80,38 @@ class InboundPortalClient:
         try:
             with httpx.Client(timeout=30.0) as client:
                 r = client.post(self.url, json=body, headers=headers)
+                parsed: dict[str, Any] | None = None
+                try:
+                    parsed = r.json()
+                except Exception:  # noqa: BLE001
+                    parsed = None
                 return {
                     "ok": r.status_code < 400,
                     "status_code": r.status_code,
                     "body": r.text[:800],
+                    "response": parsed,
+                    "conversation_id": (parsed or {}).get("conversationId"),
                     "payload": body,
                 }
         except Exception as e:  # noqa: BLE001
             log.exception("POST /api/inbound failed")
             return {"ok": False, "error": str(e), "payload": body}
+
+
+def parse_inbound_response_conversation_id(result: dict[str, Any]) -> str | None:
+    """Extract conversationId from Portal inbound result."""
+    cid = result.get("conversation_id")
+    if cid:
+        return str(cid)
+    resp = result.get("response")
+    if isinstance(resp, dict) and resp.get("conversationId"):
+        return str(resp["conversationId"])
+    raw = result.get("body")
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and data.get("conversationId"):
+                return str(data["conversationId"])
+        except json.JSONDecodeError:
+            pass
+    return None
