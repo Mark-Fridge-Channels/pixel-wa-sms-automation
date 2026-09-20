@@ -319,6 +319,10 @@ class SendAccessibilityService : AccessibilityService() {
 
         fun isBound(): Boolean = instance != null
 
+        /** True while an outbound send is armed or waiting on a11y click. */
+        fun isSending(): Boolean =
+            armed.get() || SendCoordinator.pendingJobId != null || SendCoordinator.callback != null
+
         fun goHome() {
             val svc = instance ?: return
             svc.tickHandler.post {

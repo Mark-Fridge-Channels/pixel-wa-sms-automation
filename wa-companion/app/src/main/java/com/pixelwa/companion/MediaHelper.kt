@@ -85,7 +85,7 @@ object MediaHelper {
         )
     }
 
-    /** Best-effort: newest file under WhatsApp Media dirs matching type, modified recently. */
+    /** Best-effort: newest inbound file under WhatsApp Media dirs matching type. */
     fun findRecentWhatsAppMedia(mediaType: String, maxAgeMs: Long = 60_000L): File? {
         val roots = listOf(
             File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp/WhatsApp/Media"),
@@ -113,8 +113,13 @@ object MediaHelper {
                 if (!dir.isDirectory) continue
                 // Voice Notes use year/week subdirs; Private/Sent also nested.
                 dir.walkTopDown().maxDepth(5).forEach { f ->
-                    if (!f.isFile || f.length() < 64) return@forEach
+                    if (!f.isFile) return@forEach
                     if (f.name == ".nomedia") return@forEach
+                    if (f.name.startsWith("notif_preview_")) return@forEach
+                    // Inbound only — skip our own outbound copies under Sent/.
+                    val path = f.absolutePath
+                    if (path.contains("/Sent/") || path.contains("/Private/Sent/")) return@forEach
+                    if (!isPlausibleInboundMedia(f, mediaType)) return@forEach
                     val m = f.lastModified()
                     if (m >= cutoff && m > bestMtime) {
                         best = f
@@ -124,6 +129,21 @@ object MediaHelper {
             }
         }
         return best
+    }
+
+    /**
+     * Reject tiny placeholders / avatar-sized junk that must never be uploaded as inbound media.
+     */
+    fun isPlausibleInboundMedia(file: File, mediaType: String): Boolean {
+        if (!file.isFile) return false
+        val size = file.length()
+        val min = when (mediaType) {
+            "image" -> 8_192L // real photos/thumbs on disk; avatars/notif previews are often << this
+            "video" -> 32_768L
+            "audio" -> 2_048L
+            else -> 256L
+        }
+        return size >= min
     }
 
     /** Fallback: newest MediaStore item (when WA writes through gallery). */
@@ -161,8 +181,9 @@ object MediaHelper {
                 if (dataIdx < 0) return null
                 while (c.moveToNext()) {
                     val path = c.getString(dataIdx) ?: continue
+                    if (path.contains("/Sent/") || path.contains("/Private/Sent/")) continue
                     val f = File(path)
-                    if (f.isFile && f.length() > 64) return f
+                    if (isPlausibleInboundMedia(f, mediaType)) return f
                 }
                 null
             }
@@ -175,11 +196,20 @@ object MediaHelper {
     fun detectMediaTypeFromNotification(text: String): String? {
         val t = text.lowercase()
         return when {
-            "video" in t || "视频" in t -> "video"
-            "photo" in t || "image" in t || "图片" in t || "📷" in text || "🖼️" in text -> "image"
+            "video" in t || "视频" in t || "📹" in text || "🎥" in text ||
+                "gif" in t -> "video"
+            "photo" in t || "image" in t || "图片" in t || "📷" in text || "🖼️" in text ||
+                "sticker" in t || "贴纸" in t -> "image"
             "audio" in t || "voice" in t || "语音" in t || "ptt" in t || "🎵" in text ||
-                "voice message" in t || "语音消息" in t || "audio" in t -> "audio"
-            "document" in t || "file" in t || "文档" in t || "📎" in text || "pdf" in t -> "file"
+                "🎤" in text || "voice message" in t || "语音消息" in t ||
+                "audio message" in t || "录音" in t -> "audio"
+            "document" in t || "file" in t || "文档" in t || "📎" in text ||
+                "pdf" in t || "contact card" in t || "联系人卡片" in t -> "file"
+            // Common WA template strings (EN / ZH)
+            "shared a photo" in t || "shared an image" in t || "发来一张图片" in t ||
+                "发来一张照片" in t -> "image"
+            "shared a video" in t || "发来一段视频" in t -> "video"
+            "shared a voice" in t || "shared an audio" in t || "发来一条语音" in t -> "audio"
             else -> null
         }
     }

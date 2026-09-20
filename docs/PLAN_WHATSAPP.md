@@ -1,6 +1,6 @@
 # WhatsApp 本机自动化方案
 
-> 更新：2026-09-14  
+> 更新：2026-09-20  
 > 约束：禁止 WhatsApp Web / Baileys / 扫码关联设备；Notion 流程与 SMS 对齐，仅 `Channel=WhatsApp`
 
 ## 结论
@@ -42,16 +42,20 @@ Pixel WA Companion ──轮询/回传/入站───┘
 | 出站 | 仅 **image / video** | Conversation（或 Task 覆盖）`Extended Parameters`：`{"mediaUrl":"https://...","mediaType":"image\|video"}`；正文作 caption 可选 |
 | 入站 | image / video / audio / file | Companion 读本地 WA 媒体 → `POST /webhook/whatsapp/media` → orch 上传 S3 → Portal `extendedParameters.mediaUrl` |
 
-Companion 需授予通知监听、无障碍，以及 **All files access**（读入站媒体）。版本 ≥ 0.3.0。
+Companion 需授予通知监听、无障碍，以及 **All files access**（读入站媒体）。版本 ≥ **0.3.2**。
 
 ## 已知问题 / 待办
 
-### WA 入站媒体：通知预览图 ≠ 原文件（2026-09-18）
+### WA 入站媒体：通知预览图 ≠ 原文件（2026-09-18）— 已修（0.3.2）
 
-- **现象**：入站 image 能走通 S3，但常上传的是通知栏 `EXTRA_PICTURE` 预览（几 KB），不是 WhatsApp 原图/原视频。
-- **原因**：收到的媒体多数未落到可访问的 `WhatsApp/Media/...`（未自动下载或仅在应用私有区）；Companion 等文件超时后回退预览图。
-- **影响**：Portal/`content`/`mediaUrl` 可访问，但画质/完整性不够；音频/视频更依赖原文件落盘，预览回退帮不上。
-- **后续**：强制/等待媒体下载落盘后再传；或引导打开消息触发下载；评估能否从 WA 可访问路径取原件。勿把预览图当验收通过标准。
+- **原现象**：入站 image 走通 S3，但常是通知 `largeIcon`（对方头像）或缩略图，不是原文件；音视频找不到文件时只剩文本。
+- **修复（Companion 0.3.2）**：
+  1. **禁止**用通知 Bitmap / `largeIcon` 当媒体上传；
+  2. 识别到媒体后，用通知 `contentIntent` **打开对应聊天**触发 WA 下载；
+  3. 再扫 `WhatsApp/Media/...`（排除 `Sent/`），校验最小文件大小后上传；
+  4. 仍拿不到原件则只上报文本占位，不假装媒体成功。
+- **设备侧仍需**：WA「媒体自动下载」打开；Companion「所有文件访问」已授权。
+- **残余风险**：纯 caption、无关键字且无 `EXTRA_PICTURE` 的媒体通知可能仍只当文本；阅后即焚不可落盘。
 
 ## Gate G
 

@@ -18,6 +18,15 @@
 2. 服务器 `/webhook/whatsapp` 或日志出现 from/body  
 3. Notion 有 Inbound Conversation（若 token 已配）
 
+## G2b 入站媒体（≥ Companion 0.3.2）
+
+1. WA 开启媒体自动下载；Companion 已授「所有文件访问」  
+2. 测试号发图片 / 视频 / 语音（尽量无 caption 或带 📷 类提示）  
+3. 日志应出现 `opened chat via notification contentIntent` → `media found` → `media upload ok`  
+4. **不应**再出现 `using notification preview bitmap`  
+5. S3 / Portal `mediaUrl` 应为原文件（体积明显大于头像几 KB）  
+6. 若仅文本回退：查自动下载与落盘路径 `Android/media/com.whatsapp/WhatsApp/Media/`
+
 ## G3 / G4
 
 见 [TEST_NOTION_SMS.md](./TEST_NOTION_SMS.md) 同等步骤，Channel 改为 WhatsApp；缓存文件为 `last_outbound_by_phone_whatsapp.json`。
