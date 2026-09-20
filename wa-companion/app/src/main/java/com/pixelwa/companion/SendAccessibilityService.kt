@@ -42,26 +42,7 @@ class SendAccessibilityService : AccessibilityService() {
         }
 
         dismissGateDialogs(root)
-
-        val want = SendCoordinator.pendingText
-        if (!want.isNullOrBlank()) {
-            ensureComposerText(root, want)
-        }
-
-        if (clickSend(root)) {
-            val stillMediaComposer = !root
-                .findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption_input")
-                .isNullOrEmpty() ||
-                !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption")
-                    .isNullOrEmpty()
-            if (stillMediaComposer) {
-                Log.i(TAG, "send clicked but media composer still open; wait")
-            } else {
-                Log.i(TAG, "send button clicked")
-                armed.set(false)
-                SendCoordinator.onSendAttempted(true, null)
-            }
-        }
+        attemptSend(root)
     }
 
     override fun onInterrupt() {}
@@ -138,6 +119,72 @@ class SendAccessibilityService : AccessibilityService() {
             collectText(child, out, depth + 1)
             child.recycle()
         }
+    }
+
+    /**
+     * Media share UI: only touch caption fields. Never write chat [entry] — that caused
+     * the same caption to be sent as many standalone text bubbles while send was retried.
+     */
+    private fun attemptSend(root: AccessibilityNodeInfo) {
+        val want = SendCoordinator.pendingText
+        val mediaMode = SendCoordinator.pendingMedia
+        val inMediaComposer = isMediaComposerOpen(root)
+
+        if (!want.isNullOrBlank()) {
+            if (mediaMode || inMediaComposer) {
+                ensureCaptionText(root, want)
+            } else {
+                ensureComposerText(root, want)
+            }
+        }
+
+        if (mediaMode && inMediaComposer) {
+            val now = System.currentTimeMillis()
+            if (now - lastMediaSendClickAt < MEDIA_SEND_DEBOUNCE_MS) {
+                return
+            }
+        }
+
+        if (!clickSend(root)) return
+
+        if (isMediaComposerOpen(root)) {
+            lastMediaSendClickAt = System.currentTimeMillis()
+            Log.i(TAG, "send clicked but media composer still open; wait")
+            return
+        }
+        Log.i(TAG, "send button clicked")
+        armed.set(false)
+        SendCoordinator.onSendAttempted(true, null)
+    }
+
+    private fun isMediaComposerOpen(root: AccessibilityNodeInfo): Boolean {
+        return !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption_input")
+            .isNullOrEmpty() ||
+            !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption")
+                .isNullOrEmpty()
+    }
+
+    private fun ensureCaptionText(root: AccessibilityNodeInfo, text: String): Boolean {
+        val ids = listOf(
+            "com.whatsapp:id/caption",
+            "com.whatsapp:id/caption_input",
+        )
+        for (id in ids) {
+            val nodes = root.findAccessibilityNodeInfosByViewId(id) ?: continue
+            if (nodes.isEmpty()) continue
+            val entry = nodes[0]
+            val current = entry.text?.toString().orEmpty()
+            if (current == text) return true
+            if (current.isNotBlank() && current.contains(text.take(20))) return true
+            entry.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            val ok = entry.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            Log.i(TAG, "set caption text id=$id ok=$ok len=${text.length}")
+            return ok
+        }
+        return false
     }
 
     private fun ensureComposerText(root: AccessibilityNodeInfo, text: String): Boolean {
@@ -242,8 +289,11 @@ class SendAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "WaSendA11y"
+        private const val MEDIA_SEND_DEBOUNCE_MS = 2000L
         private val armed = AtomicBoolean(false)
         private val TIME_RE = Regex("""^\d{1,2}:\d{2}(\s?[AP]M)?$""", RegexOption.IGNORE_CASE)
+        @Volatile
+        private var lastMediaSendClickAt: Long = 0L
 
         @Volatile
         private var instance: SendAccessibilityService? = null
@@ -518,25 +568,8 @@ class SendAccessibilityService : AccessibilityService() {
                         return
                     }
                     dismissGateDialogs(root)
-                    val want = SendCoordinator.pendingText
-                    if (!want.isNullOrBlank()) ensureComposerText(root, want)
-                    if (clickSend(root)) {
-                        // Media composer: first click may no-op while preview loads; only
-                        // finish once caption editor is gone (or plain chat send).
-                        val stillMediaComposer = !root
-                            .findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption_input")
-                            .isNullOrEmpty() ||
-                            !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/caption")
-                                .isNullOrEmpty()
-                        if (stillMediaComposer) {
-                            Log.i(TAG, "send clicked but media composer still open; retry")
-                        } else {
-                            Log.i(TAG, "send button clicked (tick)")
-                            armed.set(false)
-                            SendCoordinator.onSendAttempted(true, null)
-                            return
-                        }
-                    }
+                    attemptSend(root)
+                    if (!armed.get()) return
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "send tick failed", e)
@@ -547,6 +580,7 @@ class SendAccessibilityService : AccessibilityService() {
 
     private fun scheduleSendTicks() {
         cancelSendTicks()
+        lastMediaSendClickAt = 0L
         tickHandler.postDelayed(sendTick, 500L)
     }
 
@@ -562,6 +596,10 @@ object SendCoordinator {
     @Volatile
     var pendingText: String? = null
 
+    /** When true, a11y must not write chat entry — only media caption. */
+    @Volatile
+    var pendingMedia: Boolean = false
+
     @Volatile
     var callback: ((Boolean, String?) -> Unit)? = null
 
@@ -570,6 +608,7 @@ object SendCoordinator {
         callback = null
         pendingJobId = null
         pendingText = null
+        pendingMedia = false
         SendAccessibilityService.disarm()
         cb?.invoke(ok, error)
     }

@@ -190,6 +190,7 @@ class PollingForegroundService : Service() {
         var err: String? = null
         SendCoordinator.pendingJobId = job.id
         SendCoordinator.pendingText = pendingText
+        SendCoordinator.pendingMedia = job.hasMedia
         SendCoordinator.callback = { ok, error ->
             result = ok
             err = error
