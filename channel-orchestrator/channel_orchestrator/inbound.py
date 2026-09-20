@@ -13,12 +13,58 @@ from .email_util import (
     normalize_email,
     parse_public_domains,
 )
+from .exec_log import log_inbound_event
 from .notion_client import NotionClient
 from .outbound import fail_email_task_from_bounce
 from .phone import normalize_e164
 from .reply_webhook import ReplyWebhookClient
 
 log = logging.getLogger(__name__)
+
+
+def _inbound_status(result: dict[str, Any]) -> tuple[str, bool]:
+    """Map handle_inbound_message result → (monitor status, ok)."""
+    wh = result.get("webhook") if isinstance(result.get("webhook"), dict) else {}
+    if result.get("bounce"):
+        return "bounce", True
+    if result.get("cold"):
+        cold = result.get("cold_inbound") if isinstance(result.get("cold_inbound"), dict) else {}
+        ok = bool(result.get("ok", True) and cold.get("ok", True))
+        return "cold", ok
+    if result.get("skipped"):
+        return str(result.get("kind") or wh.get("reason") or "skipped"), True
+    if result.get("matched"):
+        if wh.get("skipped"):
+            return str(wh.get("reason") or "matched_skipped"), True
+        if wh and not wh.get("ok", True):
+            return "webhook_failed", False
+        return "matched", bool(result.get("ok", True))
+    return str(wh.get("reason") or "unmatched"), True
+
+
+def _log_inbound_result(
+    result: dict[str, Any],
+    *,
+    channel: str,
+    body: str = "",
+    sender: str | None = None,
+) -> dict[str, Any]:
+    status, ok = _inbound_status(result)
+    wh = result.get("webhook") if isinstance(result.get("webhook"), dict) else {}
+    reason = wh.get("reason") or wh.get("error")
+    if not reason and isinstance(result.get("event"), dict):
+        reason = result["event"].get("reason")
+    log_inbound_event(
+        channel=channel,
+        status=status,
+        sender=sender,
+        task_id=result.get("task_page_id"),
+        body=body,
+        reason=str(reason) if reason else None,
+        matched=bool(result.get("matched")),
+        ok=ok,
+    )
+    return result
 
 
 def handle_inbound_message(
@@ -50,6 +96,14 @@ def handle_inbound_message(
     except ValueError:
         interaction_at = datetime.now(timezone.utc)
 
+    def done(result: dict[str, Any], *, preview: str | None = None, sender: str | None = None) -> dict[str, Any]:
+        return _log_inbound_result(
+            result,
+            channel=ch,
+            body=preview if preview is not None else body,
+            sender=sender if sender is not None else (normalize_email(sender_raw) if ch == "EMAIL" else normalize_e164(sender_raw)) or str(sender_raw or "") or None,
+        )
+
     # Email: classify bounce / auto-reply before treating as human reply
     if ch == "EMAIL":
         cls = normalized.get("classify") or classify_inbound_email(
@@ -71,46 +125,55 @@ def handle_inbound_message(
                     notion=notion,
                     cache=cache,
                 )
-                return {
-                    "ok": True,
-                    "matched": True,
-                    "bounce": True,
-                    "kind": kind,
-                    "task_page_id": bounce_result.get("task_id"),
-                    "thread_id": matched.get("thread_id"),
-                    "webhook": {"ok": True, "skipped": True, "reason": "bounce_not_reply"},
-                    "event": {
-                        "channel": "Email",
-                        "direction": "bounce",
+                return done(
+                    {
+                        "ok": True,
+                        "matched": True,
+                        "bounce": True,
                         "kind": kind,
-                        "reason": cls.get("reason"),
-                        "gmail_thread_id": gmail_thread_id,
+                        "task_page_id": bounce_result.get("task_id"),
+                        "thread_id": matched.get("thread_id"),
+                        "webhook": {"ok": True, "skipped": True, "reason": "bounce_not_reply"},
+                        "event": {
+                            "channel": "Email",
+                            "direction": "bounce",
+                            "kind": kind,
+                            "reason": cls.get("reason"),
+                            "gmail_thread_id": gmail_thread_id,
+                        },
                     },
-                }
+                    preview=subject or body,
+                )
             log.info(
                 "email bounce unmatched kind=%s gmail_thread=%s reason=%s",
                 kind,
                 gmail_thread_id,
                 cls.get("reason"),
             )
-            return {
-                "ok": True,
-                "matched": False,
-                "bounce": True,
-                "kind": kind,
-                "webhook": {"ok": True, "skipped": True, "reason": "bounce_unmatched"},
-                "event": {"kind": kind, "reason": cls.get("reason")},
-            }
+            return done(
+                {
+                    "ok": True,
+                    "matched": False,
+                    "bounce": True,
+                    "kind": kind,
+                    "webhook": {"ok": True, "skipped": True, "reason": "bounce_unmatched"},
+                    "event": {"kind": kind, "reason": cls.get("reason")},
+                },
+                preview=subject or body,
+            )
         if kind in {"auto_reply", "system_other"}:
             log.info("email non-human ignored kind=%s reason=%s", kind, cls.get("reason"))
-            return {
-                "ok": True,
-                "matched": False,
-                "skipped": True,
-                "kind": kind,
-                "webhook": {"ok": True, "skipped": True, "reason": kind},
-                "event": {"kind": kind, "reason": cls.get("reason")},
-            }
+            return done(
+                {
+                    "ok": True,
+                    "matched": False,
+                    "skipped": True,
+                    "kind": kind,
+                    "webhook": {"ok": True, "skipped": True, "reason": kind},
+                    "event": {"kind": kind, "reason": cls.get("reason")},
+                },
+                preview=subject or body,
+            )
 
     party_key: str | None
     matched: dict[str, Any] | None = None
@@ -138,22 +201,26 @@ def handle_inbound_message(
                     party_key,
                     outbound_to,
                 )
-                return {
-                    "ok": True,
-                    "matched": False,
-                    "skipped": True,
-                    "kind": "unexpected_sender_rejected",
-                    "webhook": {
+                return done(
+                    {
                         "ok": True,
+                        "matched": False,
                         "skipped": True,
-                        "reason": "cross_domain_thread_reply_disabled",
+                        "kind": "unexpected_sender_rejected",
+                        "webhook": {
+                            "ok": True,
+                            "skipped": True,
+                            "reason": "cross_domain_thread_reply_disabled",
+                        },
+                        "event": {
+                            "channel": "Email",
+                            "reply_meta": reply_meta,
+                            "gmail_thread_id": gmail_thread_id,
+                        },
                     },
-                    "event": {
-                        "channel": "Email",
-                        "reply_meta": reply_meta,
-                        "gmail_thread_id": gmail_thread_id,
-                    },
-                }
+                    preview=subject or body,
+                    sender=party_key,
+                )
     else:
         party_key = normalize_e164(sender_raw)
         matched = cache.get_ready_for_reply(party_key) if party_key else None
@@ -229,23 +296,27 @@ def handle_inbound_message(
         from .email_cold_inbound import handle_email_cold_inbound
 
         cold = handle_email_cold_inbound(normalized)
-        return {
-            "ok": cold.get("ok", True),
-            "matched": False,
-            "cold": True,
-            "task_page_id": None,
-            "thread_id": None,
-            "conversation_page_id": None,
-            "reply_meta": None,
-            "webhook": {"ok": True, "skipped": True, "reason": "cold_inbound"},
-            "cold_inbound": cold,
-            "event": cold.get("event")
-            or {
-                "channel": "Email",
-                "direction": "cold_inbound",
+        return done(
+            {
+                "ok": cold.get("ok", True),
                 "matched": False,
+                "cold": True,
+                "task_page_id": None,
+                "thread_id": None,
+                "conversation_page_id": None,
+                "reply_meta": None,
+                "webhook": {"ok": True, "skipped": True, "reason": "cold_inbound"},
+                "cold_inbound": cold,
+                "event": cold.get("event")
+                or {
+                    "channel": "Email",
+                    "direction": "cold_inbound",
+                    "matched": False,
+                },
             },
-        }
+            preview=subject or body,
+            sender=party_key,
+        )
     else:
         log.info(
             "inbound unmatched or incomplete channel=%s party=%s has_body=%s has_media=%s",
@@ -279,16 +350,20 @@ def handle_inbound_message(
         "webhook": webhook_result,
     }
 
-    return {
-        "ok": True,
-        "matched": matched_flag,
-        "task_page_id": task_id,
-        "thread_id": thread_id,
-        "conversation_page_id": None,
-        "reply_meta": reply_meta or None,
-        "webhook": webhook_result,
-        "event": event,
-    }
+    return done(
+        {
+            "ok": True,
+            "matched": matched_flag,
+            "task_page_id": task_id,
+            "thread_id": thread_id,
+            "conversation_page_id": None,
+            "reply_meta": reply_meta or None,
+            "webhook": webhook_result,
+            "event": event,
+        },
+        preview=subject or body,
+        sender=party_key or (str(sender_raw) if sender_raw else None),
+    )
 
 
 def handle_inbound_sms(*args: Any, **kwargs: Any) -> dict[str, Any]:

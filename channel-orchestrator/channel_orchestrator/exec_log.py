@@ -31,6 +31,41 @@ def append_exec_event(event: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def log_inbound_event(
+    *,
+    channel: str,
+    status: str,
+    sender: str | None = None,
+    task_id: str | None = None,
+    body: str | None = None,
+    reason: str | None = None,
+    matched: bool | None = None,
+    ok: bool = True,
+) -> dict[str, Any]:
+    """Append an inbound-listen row for the monitor recent-log table."""
+    preview = (body or "").replace("\n", " ").strip()
+    if len(preview) > 60:
+        preview = preview[:57] + "..."
+    title = preview or (sender or "")
+    if sender and preview:
+        title = f"{sender} · {preview}"
+    elif sender:
+        title = sender
+    return append_exec_event(
+        {
+            "event": "inbound",
+            "channel": channel,
+            "status": status,
+            "ok": ok,
+            "matched": matched,
+            "task_id": task_id,
+            "title": title[:120],
+            "sender": sender,
+            "reason": reason,
+        }
+    )
+
+
 def read_recent_events(limit: int = 50) -> list[dict[str, Any]]:
     path = _path()
     if not path.exists():
@@ -56,6 +91,7 @@ def today_stats(*, day: str | None = None) -> dict[str, Any]:
         "failed": 0,
         "skipped": 0,
         "uncertain": 0,
+        "inbound": 0,
         "by_channel": {},
     }
     if not path.exists():
@@ -66,7 +102,16 @@ def today_stats(*, day: str | None = None) -> dict[str, Any]:
         if not channel:
             return
         ch = tallies["by_channel"].setdefault(
-            channel, {"claimed": 0, "executed": 0, "success": 0, "failed": 0, "skipped": 0, "uncertain": 0}
+            channel,
+            {
+                "claimed": 0,
+                "executed": 0,
+                "success": 0,
+                "failed": 0,
+                "skipped": 0,
+                "uncertain": 0,
+                "inbound": 0,
+            },
         )
         ch[key] = int(ch.get(key, 0)) + 1
 
@@ -93,6 +138,8 @@ def today_stats(*, day: str | None = None) -> dict[str, Any]:
                 bump(channel, "skipped")
             else:
                 bump(channel, "failed" if not row.get("ok", True) else "success")
+        elif event == "inbound":
+            bump(channel, "inbound")
     return {"day": day, **tallies}
 
 

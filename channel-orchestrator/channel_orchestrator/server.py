@@ -9,13 +9,14 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import settings
-from .exec_log import load_scan_state, read_recent_events, today_stats
+from .exec_log import load_scan_state, log_inbound_event, read_recent_events, today_stats
 from .gateway import SmsGatewayClient
 from .heartbeat import heartbeat_stale, read_heartbeat, touch_heartbeat
 from .inbound import handle_inbound_sms, handle_inbound_whatsapp
 from .inbound_dedupe import describe_skip, seen_or_mark
 from .outbound import finalize_whatsapp_job
 from .outbound_queue import get_outbound_queue
+from .phone import normalize_e164
 from .runtime_settings import load_runtime_settings, save_runtime_settings
 from .wa_jobs import get_wa_queue
 
@@ -174,6 +175,15 @@ async def sms_webhook(request: Request) -> JSONResponse:
         sender=str(normalized.get("sender") or ""),
     ):
         touch_heartbeat("phone")
+        log_inbound_event(
+            channel="SMS",
+            status="duplicate",
+            sender=normalize_e164(normalized.get("sender")) or str(normalized.get("sender") or "") or None,
+            body=str(normalized.get("body") or ""),
+            reason="duplicate_inbound",
+            matched=False,
+            ok=True,
+        )
         return JSONResponse(describe_skip("SMS", normalized.get("message_id")))
     result = handle_inbound_sms(normalized)
     touch_heartbeat("phone")
@@ -211,6 +221,15 @@ async def whatsapp_webhook(
         sender=str(normalized.get("sender") or ""),
     ):
         touch_heartbeat("phone")
+        log_inbound_event(
+            channel="WHATSAPP",
+            status="duplicate",
+            sender=normalize_e164(normalized.get("sender")) or str(normalized.get("sender") or "") or None,
+            body=str(normalized.get("body") or ""),
+            reason="duplicate_inbound",
+            matched=False,
+            ok=True,
+        )
         return JSONResponse(describe_skip("WHATSAPP", normalized.get("message_id")))
     result = handle_inbound_whatsapp(normalized)
     touch_heartbeat("phone")
@@ -301,6 +320,15 @@ async def whatsapp_media_webhook(
         sender=sender,
     ):
         touch_heartbeat("phone")
+        log_inbound_event(
+            channel="WHATSAPP",
+            status="duplicate",
+            sender=normalize_e164(sender) or sender or None,
+            body=caption or f"[{mtype}]",
+            reason="duplicate_inbound",
+            matched=False,
+            ok=True,
+        )
         return JSONResponse(describe_skip("WHATSAPP", message_id))
     result = handle_inbound_whatsapp(normalized)
     touch_heartbeat("phone")
@@ -425,7 +453,7 @@ def monitor_summary() -> dict[str, Any]:
         "scan_state": load_scan_state(),
         "queue": get_outbound_queue().depth(),
         "channels": channel_health(),
-        "recent": read_recent_events(40),
+        "recent": read_recent_events(80),
     }
 
 
@@ -512,8 +540,8 @@ MONITOR_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <main>
-  <h1>Outbound Monitor</h1>
-  <p class="sub">Notion Pending 扫描队列 · SMS/WA 串行 · Email 并行</p>
+  <h1>Channel Monitor</h1>
+  <p class="sub">出站扫描队列 · 入站回复监听 · SMS/WA 串行 · Email 并行</p>
   <div id="msg" class="msg"></div>
 
   <div class="grid" id="stats"></div>
@@ -537,10 +565,10 @@ MONITOR_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card" style="margin-top:14px; overflow:auto;">
-    <div class="label">最近执行日志</div>
+    <div class="label">最近日志（出站 + 入站回复）</div>
     <table>
       <thead>
-        <tr><th>时间</th><th>事件</th><th>通道</th><th>任务</th><th>结果</th><th>耗时</th></tr>
+        <tr><th>时间</th><th>事件</th><th>通道</th><th>任务 / 来源</th><th>结果</th><th>耗时</th></tr>
       </thead>
       <tbody id="logs"></tbody>
     </table>
@@ -557,7 +585,7 @@ async function load() {
     ['今日执行', s.executed],
     ['成功', s.success],
     ['失败', s.failed],
-    ['跳过', s.skipped],
+    ['入站回复', s.inbound],
     ['队列积压', q.total],
   ].map(([k,v]) => `<div class="card"><div class="label">${k}</div><div class="value">${v ?? 0}</div></div>`).join('');
 
@@ -576,12 +604,18 @@ async function load() {
     `上次扫描: ${st.last_scan_at || '-'} · found=${st.last_scan_found ?? '-'} enqueued=${st.last_scan_enqueued ?? '-'}`;
 
   const rows = (data.recent || []).map(r => {
+    const result = r.event === 'inbound'
+      ? `${r.status||''}${r.reason ? (' · '+r.reason) : ''}`
+      : (r.status||r.reason||'');
+    const who = r.event === 'inbound'
+      ? (r.title || r.sender || r.task_id || '')
+      : (r.title || r.task_id || '');
     return `<tr>
       <td>${(r.ts||'').replace('T',' ').slice(0,19)}</td>
       <td>${r.event||''}</td>
       <td>${r.channel||''}</td>
-      <td>${(r.title||r.task_id||'').toString().slice(0,42)}</td>
-      <td>${r.status||r.reason||''}</td>
+      <td>${String(who).slice(0,48)}</td>
+      <td>${String(result).slice(0,48)}</td>
       <td>${r.elapsed_ms!=null?(r.elapsed_ms+'ms'):''}</td>
     </tr>`;
   }).join('');
