@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # 0 = disabled (no daily WhatsApp cap)
     wa_daily_send_limit: int = 0
     wa_job_lease_seconds: int = 180
+    # Min seconds between WhatsApp number-probe jobs (no daily cap).
+    wa_probe_interval_seconds: int = 120
     daily_plan_hour: int = 8
     daily_plan_minute: int = 30
     # Legacy poll used by old daily-plan loop; prefer scheduler_scan_seconds.
@@ -57,6 +59,9 @@ class Settings(BaseSettings):
     # Cold inbound (no Task): POST /api/inbound. Empty → derive from reply_webhook_url.
     inbound_webhook_url: str = "https://followup-portal.fridgechannels.com/api/inbound"
     wa_api_token: str = ""
+    # Optional dedicated token for /wa/probe*; empty → fall back to wa_api_token.
+    # Probe endpoints always require a non-empty configured token.
+    wa_probe_api_token: str = ""
     # Optional; falls back to wa_api_token for /api/monitor/settings
     monitor_token: str = ""
 

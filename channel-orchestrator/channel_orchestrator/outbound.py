@@ -274,6 +274,9 @@ def finalize_whatsapp_job(
     notion: NotionClient | None = None,
     cache: OutboundCache | None = None,
 ) -> dict[str, Any]:
+    if str(job.get("job_type") or "").lower() == "probe":
+        return {"ok": True, "status": "probe", "skipped_notion": True}
+
     notion = notion or NotionClient()
     cache = cache or OutboundCache(channel="WHATSAPP")
     now = datetime.now(timezone.utc)

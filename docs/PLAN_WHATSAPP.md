@@ -44,9 +44,21 @@ Pixel WA Companion ──轮询/回传/入站───┘
 | 出站 | 仅 **image / video** | Conversation（或 Task 覆盖）`Extended Parameters`：`{"mediaUrl":"https://...","mediaType":"image\|video"}`；正文作 caption 可选 |
 | 入站 | image / video / audio / file | Companion 读本地 WA 媒体 → `POST /webhook/whatsapp/media` → orch 上传 S3 → Portal `extendedParameters.mediaUrl` |
 
-Companion 需授予通知监听、无障碍，以及 **All files access**（读入站媒体）。版本 ≥ **0.4.0**。
+Companion 需授予通知监听、无障碍，以及 **All files access**（读入站媒体）。版本 ≥ **0.4.2**（含号码探测）。
 
 专机建议：`adb shell pm grant com.pixelwa.companion android.permission.WRITE_SECURE_SETTINGS`，以便 APK 更新后自动恢复无障碍。
+
+## 号码探测（不走 Task）
+
+仅判断手机号是否有 WhatsApp，**不发送、不建 Notion Task**。全局入队间隔默认 ≥ 120s，无日上限。详见 [API_WA_PROBE.md](./API_WA_PROBE.md)。
+
+| 接口 | 说明 |
+|---|---|
+| `POST /wa/probe` | body `{ "phone": "+…" }` → 入队；Companion 打开 `api.whatsapp.com/send` 后读 UI |
+| `GET /wa/probe/{id}` | 查结果 |
+| `GET /wa/probe?phone=+…` | 按号查最新 |
+
+结果：`status` = `pending|yes|no|unknown|error`，`has_whatsapp` = `true|false|null`。
 
 ## 稳定性（0.4.0）
 

@@ -112,18 +112,19 @@ class WaJobQueue:
             return list(self._jobs[-limit:])
 
     def count_done_today(self, day_yyyy_mm_dd: str) -> int:
-        """Count successful WA sends finished on UTC day prefix (approx daily limit)."""
+        """Count successful WA sends finished on UTC day (excludes probe jobs)."""
         with self._lock:
             self.load()
             n = 0
             for j in self._jobs:
                 if j.get("status") != "done":
                     continue
+                if str(j.get("job_type") or "").lower() == "probe":
+                    continue
                 fin = str(j.get("finished_at") or "")
                 if fin.startswith(day_yyyy_mm_dd):
                     n += 1
             return n
-
 
 _queue: WaJobQueue | None = None
 

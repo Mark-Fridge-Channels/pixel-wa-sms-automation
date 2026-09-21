@@ -47,6 +47,23 @@ def _check_wa_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _probe_api_token() -> str:
+    return (settings.wa_probe_api_token or settings.wa_api_token or "").strip()
+
+
+def _check_probe_token(authorization: str | None) -> None:
+    """Probe API always requires Bearer token (WA_PROBE_API_TOKEN or WA_API_TOKEN)."""
+    token = _probe_api_token()
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail="probe API token not configured (set WA_PROBE_API_TOKEN or WA_API_TOKEN)",
+        )
+    expected = f"Bearer {token}"
+    if authorization != expected:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 def _monitor_token() -> str:
     return (settings.monitor_token or settings.wa_api_token or "").strip()
 
@@ -355,17 +372,19 @@ def wa_job_next(authorization: str | None = Header(default=None)) -> JSONRespons
     job = get_wa_queue().next_job()
     if not job:
         return JSONResponse({"ok": True, "job": None})
-    # companion needs phone digits + text (+ optional media)
+    job_type = str(job.get("job_type") or "send").strip().lower()
+    # companion needs phone digits + text (+ optional media) + job_type
     return JSONResponse(
         {
             "ok": True,
             "job": {
                 "id": job["id"],
                 "phone": job.get("phone"),
-                "text": job.get("text"),
+                "text": job.get("text") or "",
                 "task_id": job.get("task_id"),
                 "media_url": job.get("media_url"),
                 "media_type": job.get("media_type"),
+                "job_type": job_type,
             },
         }
     )
@@ -385,9 +404,82 @@ async def wa_job_result(
     job = queue.complete(job_id, ok=ok, error=error, detail=body if isinstance(body, dict) else {})
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    result = finalize_whatsapp_job(job, ok=ok, error=error)
+
+    finalize: dict[str, Any]
+    if str(job.get("job_type") or "").lower() == "probe":
+        from .wa_probe import apply_probe_result
+
+        has_raw = body.get("has_whatsapp", body.get("hasWhatsapp"))
+        has_wa: bool | None
+        if has_raw is True or has_raw is False:
+            has_wa = bool(has_raw)
+        elif isinstance(has_raw, str) and has_raw.strip().lower() in {"true", "yes", "1"}:
+            has_wa = True
+        elif isinstance(has_raw, str) and has_raw.strip().lower() in {"false", "no", "0"}:
+            has_wa = False
+        else:
+            has_wa = None
+        probe_status = body.get("probe_status") or body.get("status")
+        probe_row = apply_probe_result(
+            job_id,
+            has_whatsapp=has_wa,
+            status=str(probe_status).strip().lower() if probe_status else None,
+            detail=str(error) if error else (str(body.get("detail") or "") or None),
+            ok=ok,
+        )
+        finalize = {"ok": True, "probe": True, "probe_result": probe_row}
+    else:
+        finalize = finalize_whatsapp_job(job, ok=ok, error=error)
     touch_heartbeat("phone")
-    return JSONResponse({"ok": True, "job_id": job_id, "finalize": result})
+    return JSONResponse({"ok": True, "job_id": job_id, "finalize": finalize})
+
+
+@app.post("/wa/probe")
+async def wa_probe_create(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Check whether a phone number has WhatsApp. Body: {\"phone\": \"+1...\"}. No Notion task."""
+    _check_probe_token(authorization)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected json object")
+    phone = str(body.get("phone") or body.get("number") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone required")
+    from .wa_probe import enqueue_probe
+
+    result = enqueue_probe(phone)
+    code = int(result.pop("status_code", 200) or 200)
+    if code >= 400:
+        raise HTTPException(status_code=code, detail=result)
+    return JSONResponse(result)
+
+
+@app.get("/wa/probe/{probe_id}")
+def wa_probe_get(probe_id: str, authorization: str | None = Header(default=None)) -> JSONResponse:
+    _check_probe_token(authorization)
+    from .wa_probe import get_probe
+
+    row = get_probe(probe_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="probe not found")
+    return JSONResponse({"ok": True, "probe": row})
+
+
+@app.get("/wa/probe")
+def wa_probe_by_phone(
+    phone: str,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Lookup latest probe result by phone query param."""
+    _check_probe_token(authorization)
+    from .wa_probe import get_probe_by_phone
+
+    row = get_probe_by_phone(phone)
+    if not row:
+        raise HTTPException(status_code=404, detail="probe not found for phone")
+    return JSONResponse({"ok": True, "probe": row})
 
 
 @app.get("/wa/jobs")

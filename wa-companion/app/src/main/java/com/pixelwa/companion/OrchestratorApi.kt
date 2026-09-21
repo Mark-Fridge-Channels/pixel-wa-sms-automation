@@ -14,9 +14,13 @@ data class WaJob(
     val taskId: String? = null,
     val mediaUrl: String? = null,
     val mediaType: String? = null,
+    val jobType: String = "send",
 ) {
     val hasMedia: Boolean
         get() = !mediaUrl.isNullOrBlank() && mediaType in setOf("image", "video")
+
+    val isProbe: Boolean
+        get() = jobType.equals("probe", ignoreCase = true)
 }
 
 class OrchestratorApi(private val prefs: Prefs) {
@@ -73,6 +77,7 @@ class OrchestratorApi(private val prefs: Prefs) {
             if (id.isBlank() || phone.isBlank()) return null
             val mediaUrl = job.optString("media_url").ifBlank { null }
             val mediaType = job.optString("media_type").ifBlank { null }
+            val jobType = job.optString("job_type").ifBlank { "send" }
             return WaJob(
                 id = id,
                 phone = phone,
@@ -80,15 +85,26 @@ class OrchestratorApi(private val prefs: Prefs) {
                 taskId = job.optString("task_id").ifBlank { null },
                 mediaUrl = mediaUrl,
                 mediaType = mediaType,
+                jobType = jobType,
             )
         }
     }
 
-    fun reportResult(jobId: String, ok: Boolean, error: String? = null): Boolean {
+    fun reportResult(
+        jobId: String,
+        ok: Boolean,
+        error: String? = null,
+        hasWhatsapp: Boolean? = null,
+        probeStatus: String? = null,
+        detail: String? = null,
+    ): Boolean {
         val payload = JSONObject()
             .put("ok", ok)
             .put("success", ok)
         if (error != null) payload.put("error", error)
+        if (hasWhatsapp != null) payload.put("has_whatsapp", hasWhatsapp)
+        if (probeStatus != null) payload.put("probe_status", probeStatus)
+        if (detail != null) payload.put("detail", detail)
         val media = "application/json; charset=utf-8".toMediaType()
         val req = authHeaders(
             Request.Builder()

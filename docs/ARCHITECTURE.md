@@ -13,6 +13,7 @@
 |---|---|---|
 | [PLAN.md](./PLAN.md) | ASCII，偏 SMS | 否（缺 Email、缺统一日流程） |
 | [PLAN_WHATSAPP.md](./PLAN_WHATSAPP.md) | ASCII | 仅 WA |
+| [API_WA_PROBE.md](./API_WA_PROBE.md) | 无 | WA 号码探测 API（不走 Task） |
 | [PLAN_EMAIL.md](./PLAN_EMAIL.md) | 文字 + 前置 | 仅 Email |
 | [PLAN_REPLY_INGEST.md](./PLAN_REPLY_INGEST.md) | 文字流程 | Reply 契约，非全天调度 |
 | [IMPLEMENTATION.md](./IMPLEMENTATION.md) | 早期蓝图 | **过时**（n8n / AutoJs 等） |

@@ -29,6 +29,12 @@ class SendAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (probeArmed.get()) {
+            if (event?.packageName?.toString() != "com.whatsapp") return
+            val root = rootInActiveWindow ?: return
+            handleProbe(root)
+            return
+        }
         if (!armed.get()) return
         if (event?.packageName?.toString() != "com.whatsapp") return
         val root = rootInActiveWindow ?: return
@@ -43,6 +49,31 @@ class SendAccessibilityService : AccessibilityService() {
 
         dismissGateDialogs(root)
         attemptSend(root)
+    }
+
+    /** Probe-only: detect registered vs not; never click send. */
+    private fun handleProbe(root: AccessibilityNodeInfo) {
+        val notRegistered = detectNotOnWhatsApp(root)
+        if (notRegistered != null) {
+            Log.i(TAG, "probe: not registered — $notRegistered")
+            probeArmed.set(false)
+            cancelProbeTicks()
+            ProbeCoordinator.onResult(hasWhatsapp = false, status = "no", detail = notRegistered)
+            return
+        }
+        dismissGateDialogs(root)
+        if (hasChatComposer(root)) {
+            Log.i(TAG, "probe: composer visible — registered")
+            probeArmed.set(false)
+            cancelProbeTicks()
+            ProbeCoordinator.onResult(hasWhatsapp = true, status = "yes", detail = "composer")
+        }
+    }
+
+    private fun hasChatComposer(root: AccessibilityNodeInfo): Boolean {
+        return !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/entry").isNullOrEmpty() ||
+            !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/conversation_entry_action_button")
+                .isNullOrEmpty()
     }
 
     override fun onInterrupt() {}
@@ -291,6 +322,7 @@ class SendAccessibilityService : AccessibilityService() {
         private const val TAG = "WaSendA11y"
         private const val MEDIA_SEND_DEBOUNCE_MS = 2000L
         private val armed = AtomicBoolean(false)
+        private val probeArmed = AtomicBoolean(false)
         private val TIME_RE = Regex("""^\d{1,2}:\d{2}(\s?[AP]M)?$""", RegexOption.IGNORE_CASE)
         @Volatile
         private var lastMediaSendClickAt: Long = 0L
@@ -299,13 +331,22 @@ class SendAccessibilityService : AccessibilityService() {
         private var instance: SendAccessibilityService? = null
 
         fun armForSend() {
+            probeArmed.set(false)
             armed.set(true)
             instance?.scheduleSendTicks()
         }
 
+        fun armForProbe() {
+            armed.set(false)
+            probeArmed.set(true)
+            instance?.scheduleProbeTicks()
+        }
+
         fun disarm() {
             armed.set(false)
+            probeArmed.set(false)
             instance?.cancelSendTicks()
+            instance?.cancelProbeTicks()
         }
 
         fun snapshotMessages(): Set<String> {
@@ -319,9 +360,14 @@ class SendAccessibilityService : AccessibilityService() {
 
         fun isBound(): Boolean = instance != null
 
-        /** True while an outbound send is armed or waiting on a11y click. */
+        /** True while an outbound send/probe is armed or waiting on a11y. */
         fun isSending(): Boolean =
-            armed.get() || SendCoordinator.pendingJobId != null || SendCoordinator.callback != null
+            armed.get() ||
+                probeArmed.get() ||
+                SendCoordinator.pendingJobId != null ||
+                SendCoordinator.callback != null ||
+                ProbeCoordinator.pendingJobId != null ||
+                ProbeCoordinator.callback != null
 
         fun goHome() {
             val svc = instance ?: return
@@ -582,6 +628,22 @@ class SendAccessibilityService : AccessibilityService() {
         }
     }
 
+    private val probeTick = object : Runnable {
+        override fun run() {
+            if (!probeArmed.get()) return
+            try {
+                val root = rootInActiveWindow
+                if (root != null && root.packageName?.toString() == "com.whatsapp") {
+                    handleProbe(root)
+                    if (!probeArmed.get()) return
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "probe tick failed", e)
+            }
+            tickHandler.postDelayed(this, 700L)
+        }
+    }
+
     private fun scheduleSendTicks() {
         cancelSendTicks()
         lastMediaSendClickAt = 0L
@@ -590,6 +652,15 @@ class SendAccessibilityService : AccessibilityService() {
 
     private fun cancelSendTicks() {
         tickHandler.removeCallbacks(sendTick)
+    }
+
+    private fun scheduleProbeTicks() {
+        cancelProbeTicks()
+        tickHandler.postDelayed(probeTick, 400L)
+    }
+
+    private fun cancelProbeTicks() {
+        tickHandler.removeCallbacks(probeTick)
     }
 }
 
@@ -615,5 +686,22 @@ object SendCoordinator {
         pendingMedia = false
         SendAccessibilityService.disarm()
         cb?.invoke(ok, error)
+    }
+}
+
+object ProbeCoordinator {
+    @Volatile
+    var pendingJobId: String? = null
+
+    @Volatile
+    var callback: ((Boolean?, String, String?) -> Unit)? = null
+    // (hasWhatsapp, status yes|no|unknown, detail)
+
+    fun onResult(hasWhatsapp: Boolean?, status: String, detail: String?) {
+        val cb = callback
+        callback = null
+        pendingJobId = null
+        SendAccessibilityService.disarm()
+        cb?.invoke(hasWhatsapp, status, detail)
     }
 }

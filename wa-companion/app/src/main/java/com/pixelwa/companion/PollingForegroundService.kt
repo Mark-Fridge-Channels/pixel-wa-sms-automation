@@ -149,14 +149,30 @@ class PollingForegroundService : Service() {
         try {
             maybeWatchVpn()
             val job = api.nextJob() ?: return
-            Log.i(TAG, "got job ${job.id} -> ${job.phone}")
-            val wakeMs = if (job.hasMedia) 600_000L else 120_000L
+            Log.i(TAG, "got job ${job.id} type=${job.jobType} -> ${job.phone}")
+            val wakeMs = when {
+                job.isProbe -> 60_000L
+                job.hasMedia -> 600_000L
+                else -> 120_000L
+            }
             screenWake.acquire(timeoutMs = wakeMs)
-            // Give the display a moment to turn on before launching WhatsApp UI.
             try {
                 Thread.sleep(800)
             } catch (_: InterruptedException) {
                 // continue
+            }
+            if (job.isProbe) {
+                val (hasWa, status, detail) = probeWhatsApp(job)
+                api.reportResult(
+                    job.id,
+                    ok = status != "error",
+                    error = if (status == "error") detail else null,
+                    hasWhatsapp = hasWa,
+                    probeStatus = status,
+                    detail = detail,
+                )
+                SendAccessibilityService.leaveChatToList()
+                return
             }
             val (ok, error) = sendViaWhatsApp(job)
             api.reportResult(
@@ -171,7 +187,6 @@ class PollingForegroundService : Service() {
             if (ok) {
                 dwellAndScrapeReplies(job.phone, job.text)
             }
-            // Always leave the open chat so the phone is not stuck on WhatsApp compose.
             SendAccessibilityService.leaveChatToList()
         } catch (e: Exception) {
             Log.e(TAG, "poll failed", e)
@@ -180,6 +195,51 @@ class PollingForegroundService : Service() {
             screenWake.release()
             busy.set(false)
         }
+    }
+
+    /**
+     * Open api.whatsapp.com/send for [job.phone], detect registration, never send.
+     * @return Triple(hasWhatsapp, status yes|no|unknown|error, detail)
+     */
+    private fun probeWhatsApp(job: WaJob): Triple<Boolean?, String, String?> {
+        val digits = job.phone.filter { it.isDigit() }
+        if (digits.length < 8) {
+            return Triple(null, "error", "invalid phone digits")
+        }
+        val uri = "https://api.whatsapp.com/send?phone=$digits".toUri()
+        val latch = CountDownLatch(1)
+        var hasWa: Boolean? = null
+        var status = "unknown"
+        var detail: String? = null
+        ProbeCoordinator.pendingJobId = job.id
+        ProbeCoordinator.callback = { hw, st, det ->
+            hasWa = hw
+            status = st
+            detail = det
+            latch.countDown()
+        }
+        SendAccessibilityService.armForProbe()
+        handler.post {
+            screenWake.acquire(timeoutMs = 60_000L)
+            try {
+                startActivity(
+                    Intent(Intent.ACTION_VIEW, uri).apply {
+                        setPackage("com.whatsapp")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    },
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "probe open whatsapp failed", e)
+                ProbeCoordinator.onResult(null, "error", "无法打开 WhatsApp：${e.message}")
+            }
+        }
+        val finished = latch.await(25, TimeUnit.SECONDS)
+        if (!finished) {
+            ProbeCoordinator.onResult(null, "unknown", "probe timeout 25s")
+            latch.await(1, TimeUnit.SECONDS)
+        }
+        Log.i(TAG, "probe done phone=$digits status=$status has=$hasWa detail=$detail")
+        return Triple(hasWa, status, detail)
     }
 
     private fun sendViaWhatsApp(job: WaJob): Pair<Boolean, String?> {
