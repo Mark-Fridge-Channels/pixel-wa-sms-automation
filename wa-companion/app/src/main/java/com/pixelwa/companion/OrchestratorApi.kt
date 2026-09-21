@@ -33,19 +33,25 @@ class OrchestratorApi(private val prefs: Prefs) {
         return builder
     }
 
-    fun heartbeat(vpn: VpnSnapshot? = null): Boolean {
-        val body = if (vpn == null) {
-            ByteArray(0).toRequestBody(null)
-        } else {
-            val json = JSONObject()
-                .put("vpn_transport", vpn.vpnTransport)
+    fun heartbeat(vpn: VpnSnapshot? = null, extras: Map<String, Any?> = emptyMap()): Boolean {
+        val json = JSONObject()
+        if (vpn != null) {
+            json.put("vpn_transport", vpn.vpnTransport)
                 .put("google_ok", vpn.googleOk)
                 .put("orch_ok", vpn.orchOk)
                 .put("always_on_vpn", vpn.alwaysOn)
                 .put("vpn_recovered", vpn.recovered)
                 .put("vpn_detail", vpn.detail)
-            json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
         }
+        for ((k, v) in extras) {
+            when (v) {
+                null -> json.put(k, JSONObject.NULL)
+                is Boolean -> json.put(k, v)
+                is Number -> json.put(k, v)
+                else -> json.put(k, v.toString())
+            }
+        }
+        val body = json.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
         val req = authHeaders(
             Request.Builder().url("${prefs.serverBaseUrl}/wa/heartbeat").post(body)
         ).build()

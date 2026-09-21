@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -35,19 +36,20 @@ class MainActivity : AppCompatActivity() {
             prefs.automationEnabled = binding.masterSwitch.isChecked
             prefs.vpnWatchdogEnabled = binding.vpnWatchdogSwitch.isChecked
             applyService()
-            requestMediaPermissions()
+            requestRuntimePermissions()
+            requestBatteryExemption()
             Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
-            binding.statusText.text =
-                "Status: ${if (prefs.automationEnabled) "ON" else "OFF"} @ ${prefs.serverBaseUrl}" +
-                    if (prefs.vpnWatchdogEnabled) " · VPN watchdog" else ""
+            refreshStatus()
         }
 
         binding.masterSwitch.setOnCheckedChangeListener { _, checked ->
             prefs.automationEnabled = checked
             applyService()
+            refreshStatus()
         }
         binding.vpnWatchdogSwitch.setOnCheckedChangeListener { _, checked ->
             prefs.vpnWatchdogEnabled = checked
+            refreshStatus()
         }
 
         binding.openAccessibility.setOnClickListener {
@@ -60,20 +62,42 @@ class MainActivity : AppCompatActivity() {
             openAllFilesAccess()
         }
 
-        binding.statusText.text =
-            "Status: ${if (prefs.automationEnabled) "ON" else "OFF"} @ ${prefs.serverBaseUrl}" +
-                if (prefs.vpnWatchdogEnabled) " · VPN watchdog" else ""
         applyService()
-        requestMediaPermissions()
+        requestRuntimePermissions()
+        requestBatteryExemption()
+        ServiceWatchdog.ensureAlive(this, force = true)
+        refreshStatus()
     }
 
-    private fun requestMediaPermissions() {
+    override fun onResume() {
+        super.onResume()
+        if (intent?.getBooleanExtra(EXTRA_WATCHDOG_RESTART, false) == true) {
+            prefs.automationEnabled = true
+            binding.masterSwitch.isChecked = true
+            applyService()
+            intent?.removeExtra(EXTRA_WATCHDOG_RESTART)
+        }
+        ServiceWatchdog.ensureAlive(this, force = true)
+        refreshStatus()
+    }
+
+    private fun refreshStatus() {
+        val poll = if (PollingForegroundService.isAliveRecently()) "poll OK" else "poll ?"
+        val a11y = ServiceWatchdog.accessibilityStatusLine(this)
+        binding.statusText.text =
+            "Status: ${if (prefs.automationEnabled) "ON" else "OFF"} @ ${prefs.serverBaseUrl}" +
+                (if (prefs.vpnWatchdogEnabled) " · VPN watchdog" else "") +
+                "\n$poll · $a11y · alert SMS ${prefs.alertSmsTo}"
+    }
+
+    private fun requestRuntimePermissions() {
         val needed = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 33) {
             listOf(
                 Manifest.permission.READ_MEDIA_IMAGES,
                 Manifest.permission.READ_MEDIA_VIDEO,
                 Manifest.permission.READ_MEDIA_AUDIO,
+                Manifest.permission.POST_NOTIFICATIONS,
             ).forEach { p ->
                 if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
                     needed.add(p)
@@ -86,8 +110,31 @@ class MainActivity : AppCompatActivity() {
                 needed.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             }
         }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            needed.add(Manifest.permission.SEND_SMS)
+        }
         if (needed.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_MEDIA)
+            ActivityCompat.requestPermissions(this, needed.toTypedArray(), REQ_RUNTIME)
+        }
+    }
+
+    private fun requestBatteryExemption() {
+        if (Build.VERSION.SDK_INT < 23) return
+        val pm = getSystemService(PowerManager::class.java) ?: return
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+            )
+        } catch (_: Exception) {
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -108,21 +155,24 @@ class MainActivity : AppCompatActivity() {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
         } else {
-            requestMediaPermissions()
+            requestRuntimePermissions()
             Toast.makeText(this, "Requested storage permission", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun applyService() {
-        val intent = Intent(this, PollingForegroundService::class.java)
         if (prefs.automationEnabled) {
-            ContextCompat.startForegroundService(this, intent)
+            val ok = PollingForegroundService.ensureStarted(this)
+            if (!ok) {
+                Toast.makeText(this, "Polling service failed to start", Toast.LENGTH_LONG).show()
+            }
         } else {
-            stopService(intent)
+            stopService(Intent(this, PollingForegroundService::class.java))
         }
     }
 
     companion object {
-        private const val REQ_MEDIA = 1001
+        private const val REQ_RUNTIME = 1001
+        const val EXTRA_WATCHDOG_RESTART = "watchdog_restart"
     }
 }

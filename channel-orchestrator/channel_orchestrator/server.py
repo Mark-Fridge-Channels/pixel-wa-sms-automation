@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -19,6 +20,8 @@ from .outbound_queue import get_outbound_queue
 from .phone import normalize_e164
 from .runtime_settings import load_runtime_settings, save_runtime_settings
 from .wa_jobs import get_wa_queue
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="Channel Orchestrator")
 
@@ -440,6 +443,13 @@ async def wa_heartbeat(
     except Exception:  # noqa: BLE001
         extra = {}
     touch_heartbeat("phone", extra or None)
+    # Opportunistic health SMS (rate-limited inside).
+    try:
+        from .device_alert import maybe_alert_device_health
+
+        maybe_alert_device_health()
+    except Exception:  # noqa: BLE001
+        log.exception("device alert after heartbeat failed")
     return JSONResponse({"ok": True, "time": _now_iso()})
 
 

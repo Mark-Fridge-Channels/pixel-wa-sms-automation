@@ -35,6 +35,18 @@ class Prefs(context: Context) {
         get() = sp.getLong(KEY_VPN_BURST_WINDOW, 0L)
         set(value) = sp.edit().putLong(KEY_VPN_BURST_WINDOW, value).apply()
 
+    var alertSmsEnabled: Boolean
+        get() = sp.getBoolean(KEY_ALERT_SMS_ON, true)
+        set(value) = sp.edit().putBoolean(KEY_ALERT_SMS_ON, value).apply()
+
+    var alertSmsTo: String
+        get() = sp.getString(KEY_ALERT_SMS_TO, "+8615810494081") ?: "+8615810494081"
+        set(value) = sp.edit().putString(KEY_ALERT_SMS_TO, value.trim()).apply()
+
+    var lastAlertSmsAtMs: Long
+        get() = sp.getLong(KEY_ALERT_SMS_AT, 0L)
+        set(value) = sp.edit().putLong(KEY_ALERT_SMS_AT, value).apply()
+
     companion object {
         private const val KEY_URL = "server_url"
         private const val KEY_TOKEN = "api_token"
@@ -43,5 +55,8 @@ class Prefs(context: Context) {
         private const val KEY_VPN_LAST_RECOVER = "vpn_last_recover_ms"
         private const val KEY_VPN_BURST = "vpn_recover_burst"
         private const val KEY_VPN_BURST_WINDOW = "vpn_recover_burst_window"
+        private const val KEY_ALERT_SMS_ON = "alert_sms_on"
+        private const val KEY_ALERT_SMS_TO = "alert_sms_to"
+        private const val KEY_ALERT_SMS_AT = "alert_sms_at"
     }
 }

@@ -237,6 +237,17 @@ def main() -> None:
             ):
                 print(json.dumps(out, ensure_ascii=False, indent=2))
 
+            if not args.dry_run:
+                try:
+                    from .device_alert import maybe_alert_device_health
+
+                    alert = maybe_alert_device_health()
+                    if alert.get("sent") or alert.get("ok") is False:
+                        out["device_alert"] = alert
+                        print(json.dumps({"device_alert": alert}, ensure_ascii=False, indent=2))
+                except Exception:  # noqa: BLE001
+                    log.exception("device alert check failed")
+
         if args.once:
             tick(force_scan=True)
             # Drain remaining phone jobs with gaps for --once.

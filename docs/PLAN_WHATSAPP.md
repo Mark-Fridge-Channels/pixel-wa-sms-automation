@@ -1,7 +1,9 @@
 # WhatsApp 本机自动化方案
 
-> 更新：2026-09-20  
+> 更新：2026-09-21  
 > 约束：禁止 WhatsApp Web / Baileys / 扫码关联设备；Notion 流程与 SMS 对齐，仅 `Channel=WhatsApp`
+
+专机建议：`adb shell pm grant com.pixelwa.companion android.permission.WRITE_SECURE_SETTINGS`，以及 `SEND_SMS`，以便 APK 更新后自动恢复无障碍、异常时短信告警。韧性验收见 [TEST_RESILIENCE.md](./TEST_RESILIENCE.md)。
 
 ## 结论
 
@@ -42,7 +44,15 @@ Pixel WA Companion ──轮询/回传/入站───┘
 | 出站 | 仅 **image / video** | Conversation（或 Task 覆盖）`Extended Parameters`：`{"mediaUrl":"https://...","mediaType":"image\|video"}`；正文作 caption 可选 |
 | 入站 | image / video / audio / file | Companion 读本地 WA 媒体 → `POST /webhook/whatsapp/media` → orch 上传 S3 → Portal `extendedParameters.mediaUrl` |
 
-Companion 需授予通知监听、无障碍，以及 **All files access**（读入站媒体）。版本 ≥ **0.3.2**。
+Companion 需授予通知监听、无障碍，以及 **All files access**（读入站媒体）。版本 ≥ **0.4.0**。
+
+专机建议：`adb shell pm grant com.pixelwa.companion android.permission.WRITE_SECURE_SETTINGS`，以便 APK 更新后自动恢复无障碍。
+
+## 稳定性（0.4.0）
+
+- 轮询 FGS 从 `dataSync` 改为 **`specialUse`**，避开 Android 15 的 6h/24h 后台时长配额（此前会导致 `ForegroundServiceDidNotStopInTimeException`）。
+- 实现 `onTimeout` 优雅停机；`ServiceWatchdog` 经通知监听每 45s 检查轮询/无障碍，失败则重启或告警。
+- APK 覆盖安装会清空无障碍授权；有 `WRITE_SECURE_SETTINGS` 时可自动写回。
 
 ## 已知问题 / 待办
 
@@ -56,6 +66,11 @@ Companion 需授予通知监听、无障碍，以及 **All files access**（读�
   4. 仍拿不到原件则只上报文本占位，不假装媒体成功。
 - **设备侧仍需**：WA「媒体自动下载」打开；Companion「所有文件访问」已授权。
 - **残余风险**：纯 caption、无关键字且无 `EXTRA_PICTURE` 的媒体通知可能仍只当文本；阅后即焚不可落盘。
+
+### FGS dataSync 超时崩溃（2026-09-20）— 已修（0.4.0）
+
+- **原现象**：Companion 后台跑满约 6h 后崩溃，`dataSync` 配额耗尽无法重启，出站 job 停摆。
+- **修复**：`specialUse` + watchdog + 无障碍自检/可自动恢复。
 
 ## Gate G
 

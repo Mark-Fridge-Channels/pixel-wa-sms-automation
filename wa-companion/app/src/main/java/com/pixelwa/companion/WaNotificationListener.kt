@@ -4,6 +4,8 @@ import android.app.Notification
 import android.app.PendingIntent
 import android.graphics.Bitmap
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -11,8 +13,36 @@ import java.io.File
 import kotlin.concurrent.thread
 
 class WaNotificationListener : NotificationListenerService() {
+    private val healthHandler = Handler(Looper.getMainLooper())
+    private val healthTick = object : Runnable {
+        override fun run() {
+            try {
+                ServiceWatchdog.ensureAlive(this@WaNotificationListener)
+            } catch (e: Exception) {
+                Log.w(TAG, "health tick failed", e)
+            }
+            healthHandler.postDelayed(this, HEALTH_INTERVAL_MS)
+        }
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        Log.i(TAG, "notification listener connected")
+        healthHandler.removeCallbacks(healthTick)
+        healthHandler.post(healthTick)
+    }
+
+    override fun onListenerDisconnected() {
+        healthHandler.removeCallbacks(healthTick)
+        super.onListenerDisconnected()
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
+        // Any notification is a chance to revive polling if it died.
+        if (Prefs(this).automationEnabled) {
+            ServiceWatchdog.ensureAlive(this)
+        }
         if (sbn.packageName != "com.whatsapp") return
         val prefs = Prefs(this)
         if (!prefs.automationEnabled) return
@@ -182,5 +212,6 @@ class WaNotificationListener : NotificationListenerService() {
 
     companion object {
         private const val TAG = "WaNotif"
+        private const val HEALTH_INTERVAL_MS = 45_000L
     }
 }

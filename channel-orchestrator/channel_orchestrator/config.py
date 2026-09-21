@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # Gap between SMS/WA starts (Email is parallel and ignores this).
     send_gap_seconds: int = 90
     device_heartbeat_stale_minutes: int = 45
+    # Ops SMS when WA Companion / phone looks unhealthy (empty = disabled).
+    alert_sms_to: str = "+8615810494081"
+    alert_sms_cooldown_minutes: int = 60
+    # Require this many consecutive unhealthy scheduler checks before SMS (≈ minutes if tick~1s gated).
+    alert_unhealthy_grace_minutes: int = 20
     # After an uncertain send (timeout / unconfirmed), block Pending re-runs this long.
     outbound_uncertain_cooldown_seconds: int = 3600
 

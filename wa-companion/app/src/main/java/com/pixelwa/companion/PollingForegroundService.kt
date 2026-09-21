@@ -5,12 +5,17 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -30,8 +35,12 @@ class PollingForegroundService : Service() {
     private val tick = object : Runnable {
         override fun run() {
             if (!running) return
+            lastTickAtMs = System.currentTimeMillis()
             if (prefs.automationEnabled) {
-                thread { pollOnce() }
+                thread {
+                    ServiceWatchdog.ensureAlive(this@PollingForegroundService)
+                    pollOnce()
+                }
             }
             handler.postDelayed(this, POLL_MS)
         }
@@ -43,10 +52,19 @@ class PollingForegroundService : Service() {
         api = OrchestratorApi(prefs)
         screenWake = ScreenWake(this)
         createChannel()
+        instanceRunning = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIF_ID, buildNotification(prefs.automationEnabled, vpnOk = true))
+        val promoted = promoteToForeground()
+        if (!promoted) {
+            Log.e(TAG, "startForeground failed; stop and wait for watchdog/user")
+            instanceRunning = false
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        lastTickAtMs = System.currentTimeMillis()
+        instanceRunning = true
         if (!running) {
             running = true
             handler.post(tick)
@@ -54,21 +72,62 @@ class PollingForegroundService : Service() {
         return START_STICKY
     }
 
+    /**
+     * Android 15+: if a time-limited FGS type is ever used again, stop cleanly
+     * instead of crashing with ForegroundServiceDidNotStopInTimeException.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "onTimeout startId=$startId fgsType=$fgsType — stopSelf")
+        running = false
+        handler.removeCallbacks(tick)
+        instanceRunning = false
+        stopSelf()
+    }
+
+    private fun promoteToForeground(): Boolean {
+        val notification = buildNotification(prefs.automationEnabled, vpnOk = true)
+        return try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIF_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed", e)
+            false
+        }
+    }
+
     private fun maybeWatchVpn() {
+        val extras = ServiceWatchdog.healthExtras(this, prefs)
         if (!prefs.vpnWatchdogEnabled) {
-            api.heartbeat()
+            api.heartbeat(extras = extras)
             return
         }
         val snap = VpnHealth.probe(this, prefs)
-        api.heartbeat(snap)
+        api.heartbeat(snap, extras)
         if (snap.healthy) return
         if (!VpnWatchdog.shouldRecover(prefs)) return
         Log.w(TAG, "VPN unhealthy, recovering: ${snap.detail}")
         screenWake.acquire(timeoutMs = 90_000L)
         val ok = VpnWatchdog.recover(this, prefs)
         VpnHealth.invalidate()
-        api.heartbeat(VpnHealth.probe(this, prefs, force = true).copy(recovered = ok))
+        val after = VpnHealth.probe(this, prefs, force = true).copy(recovered = ok)
+        api.heartbeat(after, ServiceWatchdog.healthExtras(this, prefs))
         refreshNotification(ok)
+        if (!after.healthy) {
+            AlertSms.maybeSend(
+                this,
+                prefs,
+                "VPN recover failed: ${after.detail}",
+            )
+        }
     }
 
     private fun refreshNotification(vpnOk: Boolean) {
@@ -78,6 +137,7 @@ class PollingForegroundService : Service() {
 
     override fun onDestroy() {
         running = false
+        instanceRunning = false
         handler.removeCallbacks(tick)
         super.onDestroy()
     }
@@ -307,5 +367,36 @@ class PollingForegroundService : Service() {
         // Short dwell for bubble scrape; inbound also covered by notification listener.
         private const val DWELL_MS = 8_000L
         private const val SCRAPE_INTERVAL_MS = 1_500L
+
+        @Volatile
+        private var instanceRunning: Boolean = false
+
+        @Volatile
+        var lastTickAtMs: Long = 0L
+            private set
+
+        fun isAliveRecently(maxAgeMs: Long = 45_000L): Boolean {
+            if (!instanceRunning) return false
+            val last = lastTickAtMs
+            if (last <= 0L) return false
+            return System.currentTimeMillis() - last <= maxAgeMs
+        }
+
+        /** Start or revive the polling FGS; returns false if the system blocked startForeground. */
+        fun ensureStarted(context: Context): Boolean {
+            val prefs = Prefs(context)
+            if (!prefs.automationEnabled) return false
+            if (isAliveRecently()) return true
+            return try {
+                ContextCompat.startForegroundService(
+                    context.applicationContext,
+                    Intent(context.applicationContext, PollingForegroundService::class.java),
+                )
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "ensureStarted failed", e)
+                false
+            }
+        }
     }
 }

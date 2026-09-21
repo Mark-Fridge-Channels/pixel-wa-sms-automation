@@ -15,6 +15,14 @@ _VPN_KEYS = (
     "always_on_vpn",
     "vpn_recovered",
     "vpn_detail",
+    # Companion health (0.4+)
+    "poll_alive",
+    "a11y_bound",
+    "a11y_settings",
+    "automation_on",
+    "app_version",
+    "boot_elapsed_ms",
+    "alert_local_sent",
 )
 
 
