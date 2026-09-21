@@ -322,6 +322,17 @@ class NotionClient:
                     email = raw_email
                     if not email:
                         error = f"Key Person 邮箱无效或为空：{kp_props.get('Email')!r}"
+                elif channel == "WHATSAPP":
+                    # WA 出站用 Key Person「WhatsApp Number」，不用 Phone（Phone 留给 SMS）
+                    raw_phone = (
+                        phone_value(kp_props.get("WhatsApp Number"))
+                        or phone_value(kp_props.get("WhatsApp number"))
+                    )
+                    phone_e164, phone_err = normalize_e164_with_reason(raw_phone)
+                    if not phone_e164:
+                        error = phone_err or (
+                            f"Key Person WhatsApp Number 无效或为空：原始={raw_phone!r}"
+                        )
                 else:
                     raw_phone = phone_value(kp_props.get("Phone"))
                     phone_e164, phone_err = normalize_e164_with_reason(raw_phone)

@@ -189,7 +189,7 @@ sequenceDiagram
 
 | 步骤 | SMS | WhatsApp | Email |
 |---|---|---|---|
-| 收件人 | Key Person.`Phone` | 同左 | Key Person.`Email` |
+| 收件人 | Key Person.`Phone` | Key Person.`WhatsApp Number` | Key Person.`Email` |
 | 正文 | Conversation.`Content` | 同左 | 同左 + Subject |
 | 系统 Thread ID | Conversation.`Thread ID` | 同左 | 同左 |
 | 供应商线程 | — | — | `Extended Parameters.gmailThreadId` 空=新开，有=跟帖 |

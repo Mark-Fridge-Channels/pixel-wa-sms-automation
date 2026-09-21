@@ -15,9 +15,9 @@
 
 ## Notion 流程
 
-与 SMS 相同：当天 Pending → Priority 工作窗排程 → 复核 → Contact→Key Person→Phone → 唯一 Conversation.`Content` → 更新 Task Status/Ended At → 更新 Conversation → 按号缓存 → 入站匹配。
+与 SMS 相同：当天 Pending → Priority 工作窗排程 → 复核 → Contact→Key Person → 唯一 Conversation.`Content` → 更新 Task Status/Ended At → 更新 Conversation → 按号缓存 → 入站匹配。
 
-差异：Thread ID = `wa:{e164}`；执行器为 Companion，非 SMS Gateway。
+差异：收件号取 Key Person.**`WhatsApp Number`**（不是 `Phone`）；Thread ID = `wa:{e164}`；执行器为 Companion，非 SMS Gateway。
 
 ## 架构
 
