@@ -16,6 +16,15 @@ import httpx
 from .config import settings
 from .email_util import extract_emails_from_header_value, normalize_email
 from .email_classify import classify_inbound_email
+from .email_html import (
+    extract_img_srcs,
+    html_to_plain_text,
+    looks_like_html,
+    mime_from_url_or_header,
+    rewrite_img_src,
+    sanitize_email_html,
+)
+from .s3_media import is_allowed_s3_media_url
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +117,8 @@ class GmailClient:
         thread_id: str | None = None,
         in_reply_to: str | None = None,
         references: str | None = None,
+        cc: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         msg = EmailMessage()
         msg["To"] = to
@@ -115,17 +126,93 @@ class GmailClient:
         from_addr = settings.gmail_user or self.user
         if from_addr and from_addr != "me":
             msg["From"] = from_addr
+        if cc:
+            msg["Cc"] = ", ".join(cc)
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
         if references:
             msg["References"] = references
-        msg.set_content(body or "")
+
+        html_body: str | None = None
+        related: list[dict[str, Any]] = []
+        if looks_like_html(body or ""):
+            sanitized = sanitize_email_html(body or "", is_allowed_s3_media_url)
+            if sanitized:
+                html_body, related = self._cid_inline_images(sanitized)
+                msg.set_content(html_to_plain_text(html_body) or " ")
+                msg.add_alternative(html_body, subtype="html")
+                html_part = _html_part(msg)
+                for item in related:
+                    if html_part is None:
+                        break
+                    html_part.add_related(
+                        item["bytes"],
+                        maintype=item["maintype"],
+                        subtype=item["subtype"],
+                        cid=f"<{item['cid']}>",
+                        disposition="inline",
+                    )
+            else:
+                msg.set_content(body or "")
+        else:
+            msg.set_content(body or "")
+
+        for att in attachments or []:
+            data = att.get("bytes") or att.get("data") or b""
+            if not data:
+                continue
+            filename = str(att.get("filename") or att.get("name") or "attachment.bin")
+            maintype, subtype = _split_mime(str(att.get("mime") or att.get("mimeType") or "application/octet-stream"))
+            msg.add_attachment(
+                data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=filename,
+            )
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii").rstrip("=")
         payload: dict[str, Any] = {"raw": raw}
         if thread_id:
             payload["threadId"] = thread_id
         return self._request("POST", "/messages/send", json=payload)
+
+    def _cid_inline_images(self, html: str) -> tuple[str, list[dict[str, Any]]]:
+        """Download allowlisted S3 <img src> and rewrite to cid:. Leave URL on download failure."""
+        related: list[dict[str, Any]] = []
+        rewritten = html
+        for index, src in enumerate(extract_img_srcs(html)):
+            if src.lower().startswith("cid:"):
+                continue
+            if not is_allowed_s3_media_url(src):
+                continue
+            try:
+                with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+                    response = client.get(src)
+                    if response.status_code >= 400:
+                        log.warning("inline image HTTP %s %s", response.status_code, src)
+                        continue
+                    data = response.content or b""
+                    header_type = response.headers.get("content-type")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("inline image download failed %s: %s", src, exc)
+                continue
+            if not data:
+                continue
+            if len(data) > int(settings.email_attachment_max_bytes):
+                log.warning("inline image too large (%s bytes) %s", len(data), src)
+                continue
+            cid = f"img{index + 1}"
+            maintype, subtype = mime_from_url_or_header(src, header_type)
+            related.append(
+                {
+                    "cid": cid,
+                    "bytes": data,
+                    "maintype": maintype,
+                    "subtype": subtype,
+                }
+            )
+            rewritten = rewrite_img_src(rewritten, src, f"cid:{cid}")
+        return rewritten, related
 
     def get_thread(self, thread_id: str) -> dict[str, Any]:
         return self._request("GET", f"/threads/{thread_id}", params={"format": "metadata"})
@@ -164,8 +251,10 @@ class GmailClient:
         subject: str,
         body: str,
         gmail_thread_id: str | None = None,
+        cc: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """New thread if no gmail_thread_id; else reply in thread."""
+        """New thread if no gmail_thread_id; else reply in thread (To + optional Cc, not Reply-All)."""
         in_reply_to = None
         references = None
         subj = subject or "(no subject)"
@@ -185,6 +274,8 @@ class GmailClient:
             thread_id=gmail_thread_id,
             in_reply_to=in_reply_to,
             references=references,
+            cc=cc,
+            attachments=attachments,
         )
         return {
             "gmail_message_id": sent.get("id"),
@@ -334,7 +425,19 @@ class GmailClient:
             "is_auto": not auto_cls.get("is_human"),
             "classify": auto_cls,
             "label_ids": label_ids,
+            "attachment_parts": _list_attachment_parts(payload),
         }
+
+    def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        data = self._request(
+            "GET",
+            f"/messages/{message_id}/attachments/{attachment_id}",
+        )
+        raw = data.get("data") or ""
+        if not raw:
+            return b""
+        pad = "=" * (-len(raw) % 4)
+        return base64.urlsafe_b64decode(raw + pad)
 
 
 def _extract_plain_body(payload: dict[str, Any]) -> str:
@@ -359,6 +462,54 @@ def _extract_plain_body(payload: dict[str, Any]) -> str:
     if html:
         return re.sub(r"<[^>]+>", " ", html).strip()
     return ""
+
+
+def _list_attachment_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect downloadable attachment parts (filename + attachmentId)."""
+    out: list[dict[str, Any]] = []
+
+    def walk(part: dict[str, Any]) -> None:
+        filename = (part.get("filename") or "").strip()
+        body = part.get("body") or {}
+        att_id = body.get("attachmentId")
+        if filename and att_id:
+            out.append(
+                {
+                    "filename": filename,
+                    "mimeType": part.get("mimeType") or "application/octet-stream",
+                    "attachmentId": att_id,
+                    "size": int(body.get("size") or 0),
+                }
+            )
+        for child in part.get("parts") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    walk(payload)
+    return out
+
+
+def _split_mime(mime: str) -> tuple[str, str]:
+    m = (mime or "application/octet-stream").strip().lower()
+    if "/" in m:
+        a, b = m.split("/", 1)
+        return a or "application", b or "octet-stream"
+    return "application", "octet-stream"
+
+
+def _html_part(msg: EmailMessage) -> EmailMessage | None:
+    if msg.get_content_type() == "text/html":
+        return msg
+    payload = msg.get_payload()
+    if not isinstance(payload, list):
+        return None
+    for part in payload:
+        if not isinstance(part, EmailMessage):
+            continue
+        found = _html_part(part)
+        if found is not None:
+            return found
+    return None
 
 
 def _b64url_decode(data: str) -> str:

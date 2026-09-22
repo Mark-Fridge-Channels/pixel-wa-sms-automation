@@ -10,6 +10,7 @@ import httpx
 
 from .channels import channel_display_name, normalize_channel
 from .config import settings
+from .email_attachments import EmailAttachmentPipeline, parse_attachments_json, parse_cc_list
 from .email_util import email_value_from_prop, normalize_email
 from .notion_props import (
     date_start,
@@ -45,6 +46,9 @@ class ResolvedTask:
     email: str | None = None
     subject: str | None = None
     extended_parameters: dict[str, Any] = field(default_factory=dict)
+    attachments: list[dict[str, Any]] = field(default_factory=list)
+    cc: list[str] = field(default_factory=list)
+    attachment_warnings: list[str] = field(default_factory=list)
     resolve_error: str | None = None
 
 
@@ -300,6 +304,9 @@ class NotionClient:
         thread_id: str | None = None
         subject: str | None = None
         extended: dict[str, Any] = {}
+        attachments: list[dict[str, Any]] = []
+        cc_list: list[str] = []
+        attachment_warnings: list[str] = []
         error: str | None = None
 
         if not contact_id:
@@ -357,10 +364,20 @@ class NotionClient:
             media_url = str(extended.get("mediaUrl") or extended.get("media_url") or "").strip()
             media_type = str(extended.get("mediaType") or extended.get("media_type") or "").strip().lower()
             has_media = bool(media_url) and media_type in {"image", "video"}
-            if not content and not has_media:
+
+            if channel == "EMAIL":
+                raw_atts = parse_attachments_json(rich_text_plain(cp.get("Attachments")))
+                pipeline = EmailAttachmentPipeline()
+                attachments, attachment_warnings = pipeline.prepare_outbound(raw_atts)
+                cc_list = parse_cc_list(rich_text_plain(cp.get("CC")) or rich_text_plain(cp.get("Cc")))
+                has_email_files = bool(attachments)
+            else:
+                has_email_files = False
+
+            if not content and not has_media and not has_email_files:
                 error = (error + "；" if error else "") + "Conversation Content 为空"
-            if not content and has_media:
-                content = ""  # caption optional when sending image/video
+            if not content and (has_media or has_email_files):
+                content = ""  # caption optional when sending media/attachments
             if not thread_id:
                 error = (error + "；" if error else "") + "Conversation 缺少 Thread ID（须由 Task/Conversation 携带，不可本地生成）"
             if media_url and media_type and media_type not in {"image", "video"}:
@@ -386,6 +403,9 @@ class NotionClient:
             email=email,
             subject=subject,
             extended_parameters=extended,
+            attachments=attachments,
+            cc=cc_list,
+            attachment_warnings=attachment_warnings,
             resolve_error=error,
         )
 

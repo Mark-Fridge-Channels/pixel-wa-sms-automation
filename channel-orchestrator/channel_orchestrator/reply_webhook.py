@@ -48,6 +48,9 @@ class ReplyWebhookClient:
             or payload.get("extended_parameters")
             or {},
         }
+        attachments = payload.get("attachments")
+        if isinstance(attachments, list) and attachments:
+            body["attachments"] = attachments
         if payload.get("subject") is not None or payload.get("channel") == "Email":
             body["subject"] = payload.get("subject") or ""
         if not body["taskId"] or not body["threadId"]:
@@ -59,8 +62,11 @@ class ReplyWebhookClient:
             }
         ext = body.get("extendedParameters") or {}
         has_media = bool(ext.get("mediaUrl"))
+        has_attachments = bool(body.get("attachments"))
         if not body["content"] and has_media:
             body["content"] = ext.get("mediaType") and f"[{ext.get('mediaType')}]" or "[media]"
+        if not body["content"] and has_attachments:
+            body["content"] = "[attachments]"
         if not body["content"]:
             return {
                 "ok": False,
@@ -185,6 +191,7 @@ class ReplyWebhookClient:
         gmail_thread_id: str | None = None,
         gmail_message_id: str | None = None,
         extra_extended: dict[str, Any] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         ext: dict[str, Any] = {}
         if gmail_thread_id:
@@ -193,7 +200,7 @@ class ReplyWebhookClient:
             ext["gmailMessageId"] = gmail_message_id
         if extra_extended:
             ext.update({k: v for k, v in extra_extended.items() if v is not None})
-        return {
+        out: dict[str, Any] = {
             "taskId": task_id,
             "threadId": thread_id,
             "content": content,
@@ -204,6 +211,9 @@ class ReplyWebhookClient:
             "occurredAt": _iso(occurred_at),
             "extendedParameters": ext,
         }
+        if attachments:
+            out["attachments"] = attachments
+        return out
 
 
 def _iso(value: datetime | str | None) -> str:

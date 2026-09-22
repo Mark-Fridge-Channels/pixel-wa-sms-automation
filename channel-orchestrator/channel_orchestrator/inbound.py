@@ -14,12 +14,45 @@ from .email_util import (
     parse_public_domains,
 )
 from .exec_log import log_inbound_event
+from .email_attachments import EmailAttachmentPipeline, append_content_notices
 from .notion_client import NotionClient
 from .outbound import fail_email_task_from_bounce
 from .phone import normalize_e164
 from .reply_webhook import ReplyWebhookClient
 
 log = logging.getLogger(__name__)
+
+
+def _enrich_email_attachments(normalized: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], str]:
+    """Upload Gmail parts → Portal attachments; append notices into content. Never fails hard."""
+    body = str(normalized.get("body") or normalized.get("text") or "")
+    parts = normalized.get("attachment_parts") or []
+    if not isinstance(parts, list) or not parts:
+        # Still allow precomputed attachments/notices
+        pre = normalized.get("attachments") if isinstance(normalized.get("attachments"), list) else []
+        notices = normalized.get("attachment_notices") if isinstance(normalized.get("attachment_notices"), list) else []
+        body2 = append_content_notices(body, [str(n) for n in notices])
+        return list(pre), [str(n) for n in notices], body2
+
+    mid = str(normalized.get("gmail_message_id") or normalized.get("message_id") or "")
+    pipeline = EmailAttachmentPipeline()
+    try:
+        from .gmail_client import GmailClient
+
+        gmail = GmailClient()
+        attachments, notices = pipeline.process_gmail_parts(
+            gmail=gmail,
+            message_id=mid,
+            parts=parts,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("email attachment enrich failed")
+        attachments, notices = [], [f"附件处理异常：{e}"]
+    body2 = append_content_notices(body, notices)
+    normalized["attachments"] = attachments
+    normalized["attachment_notices"] = notices
+    normalized["body"] = body2
+    return attachments, notices, body2
 
 
 def _inbound_status(result: dict[str, Any]) -> tuple[str, bool]:
@@ -87,6 +120,8 @@ def handle_inbound_message(
     gmail_thread_id = normalized.get("gmail_thread_id") or normalized.get("gmailThreadId")
     subject = normalized.get("subject") or ""
     received_at = normalized.get("received_at")
+    email_attachments: list[dict[str, Any]] = []
+    email_attachment_notices: list[str] = []
     try:
         interaction_at = (
             datetime.fromisoformat(str(received_at).replace("Z", "+00:00"))
@@ -236,6 +271,10 @@ def handle_inbound_message(
     if not body and media_type:
         body = f"[{media_type}]"
 
+    if ch == "EMAIL":
+        # After bounce/auto skip: upload attachments for Task replies or cold inbound.
+        email_attachments, email_attachment_notices, body = _enrich_email_attachments(normalized)
+
     label = channel_display_name(ch)
     # Inbound listen: log + Portal callback only. Do NOT create Notion Conversation
     # rows here — Portal owns Conversation writes after /api/replies.
@@ -247,7 +286,7 @@ def handle_inbound_message(
         )
 
     webhook_result: dict[str, Any]
-    if matched_flag and task_id and thread_id and (body or media_url):
+    if matched_flag and task_id and thread_id and (body or media_url or email_attachments):
         if ch == "WHATSAPP":
             payload = reply_webhook.build_whatsapp_payload(
                 task_id=task_id,
@@ -279,6 +318,7 @@ def handle_inbound_message(
                     "sameOrgDomain": reply_meta.get("sameOrgDomain"),
                     "unexpectedSender": reply_meta.get("unexpectedSender"),
                 },
+                attachments=email_attachments or None,
             )
         else:
             payload = reply_webhook.build_sms_payload(
@@ -291,7 +331,7 @@ def handle_inbound_message(
                 sms_from=party_key,
             )
         webhook_result = reply_webhook.post_reply(payload)
-    elif ch == "EMAIL" and body:
+    elif ch == "EMAIL" and (body or email_attachments or email_attachment_notices):
         # No Task ready → cold inbound (POST /api/inbound); ignore Gmail thread cache
         from .email_cold_inbound import handle_email_cold_inbound
 

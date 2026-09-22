@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     s3_prefix: str = "wa-inbound"
     # Optional CDN / public base, e.g. https://cdn.example.com — else virtual-hosted S3 URL
     s3_public_base_url: str = ""
+    # Email attachments → Portal attachments[] (S3 key prefix files/{id}.ext)
+    s3_file_prefix: str = "files"
+    email_attachment_mime_types: str = "application/pdf,image/jpeg,image/png,image/webp"
+    email_attachment_max_bytes: int = 10 * 1024 * 1024
+    email_attachment_max_count: int = 5
 
     data_dir: str = ""
 

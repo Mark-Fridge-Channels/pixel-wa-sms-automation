@@ -9,8 +9,10 @@
 - 系统 `threadId` = Conversation.`Thread ID`（如 `THR-…-Email`），只拷贝。
 - Gmail 线程 = Conversation.`Extended Parameters` JSON 中的 `gmailThreadId` / `gmailMessageId`。
 - 新开线程：Extended Parameters 空 → `messages.send` 新线程；成功后回写 Gmail ids。
-- 跟帖：Extended Parameters 有 `gmailThreadId` → 同线程回复。
+- 跟帖：Extended Parameters 有 `gmailThreadId` → 同线程回复（`To`=KeyPerson；`CC` 列逗号抄送；**非** Reply-All）。
 - 入站：轮询 `users.history.list` → `POST /api/replies`（`channel=Email`，`messageId=""`，ext 带 Gmail ids）。
+- 附件：入站 Gmail → S3 `files/{id}.ext` → 顶层 `attachments[]`；非法项不失败，提示写入 `content`。出站读 Conversation.`Attachments`（同形 JSON）下载后 MIME 附件发送。
+- HTML 正文：Conversation.`Content` 可存消毒后的 HTML（`<p>` / `<img src="https://…s3…">` 等标签，禁止 base64）。历史纯文本仍按 `text/plain` 发出。出站构建 `multipart/alternative`（plain 降级 + HTML）；S3 图片下载后改写成 CID 内嵌。
 
 ## 前置（ella@fridgechannels.com）
 

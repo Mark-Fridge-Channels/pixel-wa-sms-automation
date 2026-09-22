@@ -38,6 +38,11 @@ def handle_email_cold_inbound(
     body = str(normalized.get("body") or normalized.get("text") or "")
     gmail_message_id = normalized.get("gmail_message_id") or normalized.get("message_id")
     gmail_thread_id = normalized.get("gmail_thread_id") or normalized.get("gmailThreadId")
+    attachments = (
+        list(normalized.get("attachments") or [])
+        if isinstance(normalized.get("attachments"), list)
+        else []
+    )
 
     extended: dict[str, Any] = {}
     if gmail_thread_id:
@@ -93,6 +98,7 @@ def handle_email_cold_inbound(
             subject=subject,
             followup_client_id=fcid,
             extended_parameters=extended or None,
+            attachments=attachments or None,
         )
         conv_id = parse_inbound_response_conversation_id(result)
         ext_write: dict[str, Any] | None = None

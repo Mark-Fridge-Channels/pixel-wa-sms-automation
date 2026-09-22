@@ -37,6 +37,7 @@ class InboundPortalClient:
         subject: str | None = None,
         followup_client_id: str | None = None,
         extended_parameters: dict[str, Any] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.url:
             log.info("INBOUND_WEBHOOK_URL empty; skip inbound sender=%s", sender)
@@ -62,9 +63,14 @@ class InboundPortalClient:
             ext = {k: v for k, v in extended_parameters.items() if v is not None and v != ""}
             if ext:
                 body["extendedParameters"] = ext
+        if attachments:
+            body["attachments"] = attachments
         # Never send taskId on cold inbound
         body.pop("taskId", None)
 
+        has_attachments = bool(body.get("attachments"))
+        if not body["content"] and has_attachments:
+            body["content"] = "[attachments]"
         if not body["sender"] or (channel != "Phone" and not body["content"]):
             return {
                 "ok": False,

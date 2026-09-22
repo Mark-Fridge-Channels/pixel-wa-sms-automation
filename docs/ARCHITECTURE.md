@@ -239,6 +239,10 @@ Email 入站：优先按 `gmailThreadId` 挂原 Task；From≠出站收件人时
 
 无 Task ready 时走冷进线 `POST /api/inbound`（Domain → `FollowUpClientId`），见 [PLAN_EMAIL_COLD_INBOUND.md](./PLAN_EMAIL_COLD_INBOUND.md)。
 
+Email 附件：Gmail parts → S3 `files/{id}.ext` → Portal 顶层 `attachments[]`；非法 MIME/大小不失败，提示写入 `content`。出站读 Conversation.`Attachments` + `CC`（逗号分隔抄送，非 Reply-All）。
+
+Email HTML：Portal 编辑器把消毒后的 HTML 写入 Conversation.`Content`（图片为 S3 URL 标签，不存 base64）。Orchestrator 兼容旧纯文本；新 HTML 以 `text/html` 发出，并把 S3 `<img>` 转为 CID 内嵌。
+
 详情：[PLAN_REPLY_INGEST.md](./PLAN_REPLY_INGEST.md) · [PLAN_EMAIL.md](./PLAN_EMAIL.md)
 
 ---

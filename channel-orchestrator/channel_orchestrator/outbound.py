@@ -426,7 +426,8 @@ def execute_resolved_email(
             "channel": "EMAIL",
         }
 
-    assert resolved.email and resolved.content and resolved.conversation_id and resolved.thread_id
+    assert resolved.email and resolved.conversation_id and resolved.thread_id
+    # content may be empty when attachments present
 
     gmail_thread_id = (
         (resolved.extended_parameters or {}).get("gmailThreadId")
@@ -444,8 +445,22 @@ def execute_resolved_email(
             "gmail_thread_id": gmail_thread_id,
             "subject": subject,
             "content": resolved.content,
+            "cc": list(resolved.cc or []),
+            "attachments": len(resolved.attachments or []),
             "channel": "EMAIL",
         }
+
+    from .email_attachments import EmailAttachmentPipeline
+
+    pipeline = EmailAttachmentPipeline()
+    file_parts, dl_notices = pipeline.download_for_send(list(resolved.attachments or []))
+    warnings = list(resolved.attachment_warnings or []) + dl_notices
+    if not (resolved.content or "").strip() and not file_parts:
+        msg = "Email 无正文且无可用附件"
+        if warnings:
+            msg = f"{msg}；" + "；".join(warnings)
+        notion.update_task_status(resolved.task_id, "Failed", ended_at=now, notes=msg)
+        return {"ok": False, "status": "failed", "reason": msg, "task_id": resolved.task_id}
 
     cache.set_pending(
         resolved.email,
@@ -460,8 +475,10 @@ def execute_resolved_email(
         sent = gmail.send_new_or_reply(
             to=resolved.email,
             subject=subject,
-            body=resolved.content,
+            body=resolved.content or "",
             gmail_thread_id=gmail_thread_id,
+            cc=list(resolved.cc or []) or None,
+            attachments=file_parts or None,
         )
     except Exception as e:  # noqa: BLE001
         msg = f"Email 发送失败：{e}"
@@ -481,7 +498,10 @@ def execute_resolved_email(
     sent_at = datetime.now(timezone.utc)
     gtid = sent.get("gmail_thread_id")
     gmid = sent.get("gmail_message_id")
-    notion.update_task_status(resolved.task_id, "Completed", ended_at=sent_at)
+    notes = None
+    if warnings:
+        notes = "附件提示：" + "；".join(warnings)
+    notion.update_task_status(resolved.task_id, "Completed", ended_at=sent_at, notes=notes)
     notion.update_conversation_outbound(
         resolved.conversation_id,
         message_status="Sent",
@@ -520,6 +540,9 @@ def execute_resolved_email(
         "thread_id": resolved.thread_id,
         "gmail_thread_id": gtid,
         "gmail_message_id": gmid,
+        "cc": list(resolved.cc or []),
+        "attachments_sent": len(file_parts),
+        "attachment_warnings": warnings,
         "channel": "EMAIL",
     }
 
