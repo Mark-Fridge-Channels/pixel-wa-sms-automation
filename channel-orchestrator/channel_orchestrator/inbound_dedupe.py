@@ -40,18 +40,47 @@ def _save(data: dict[str, float]) -> None:
     tmp.replace(p)
 
 
-def seen_or_mark(channel: str, message_id: str | None, *, body: str | None = None, sender: str | None = None) -> bool:
-    """Return True if this inbound was already processed (caller should skip)."""
+def _key(channel: str, message_id: str | None, *, body: str | None = None, sender: str | None = None) -> str | None:
     mid = (message_id or "").strip()
     if mid:
-        key = f"{channel}:{mid}"
-    else:
-        # Fallback when provider id missing: coarse fingerprint.
-        b = (body or "").strip()
-        s = (sender or "").strip()
-        if not b or not s:
+        return f"{channel}:{mid}"
+    b = (body or "").strip()
+    s = (sender or "").strip()
+    if not b or not s:
+        return None
+    return f"{channel}:fp:{s}:{b[:120]}"
+
+
+def already_seen(channel: str, message_id: str | None, *, body: str | None = None, sender: str | None = None) -> bool:
+    key = _key(channel, message_id, body=body, sender=sender)
+    if not key:
+        return False
+    now = time.time()
+    with _lock:
+        data = _load()
+        ts = data.get(key)
+        return ts is not None and now - ts < _TTL_SECONDS
+
+
+def forget(channel: str, message_id: str | None, *, body: str | None = None, sender: str | None = None) -> bool:
+    """Drop one dedupe key so a skipped inbound can be replayed."""
+    key = _key(channel, message_id, body=body, sender=sender)
+    if not key:
+        return False
+    with _lock:
+        data = _load()
+        if key not in data:
             return False
-        key = f"{channel}:fp:{s}:{b[:120]}"
+        del data[key]
+        _save(data)
+        return True
+
+
+def seen_or_mark(channel: str, message_id: str | None, *, body: str | None = None, sender: str | None = None) -> bool:
+    """Return True if this inbound was already processed (caller should skip)."""
+    key = _key(channel, message_id, body=body, sender=sender)
+    if not key:
+        return False
 
     now = time.time()
     with _lock:

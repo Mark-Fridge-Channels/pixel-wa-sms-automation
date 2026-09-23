@@ -661,6 +661,63 @@ def test_email_auto_reply_is_ingested(tmp_path, monkeypatch):
     assert wh.build_email_payload.call_args.kwargs["subject"].startswith("Automatic reply:")
 
 
+def test_gmail_ingest_force_replays_seen_auto_reply(tmp_path, monkeypatch):
+    from channel_orchestrator.inbound import ingest_gmail_messages
+    from channel_orchestrator.inbound_dedupe import already_seen, seen_or_mark
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "notion_token", "")
+    seen_or_mark("EMAIL", "gm-ooo")
+    cache = OutboundCache(channel="EMAIL", path=tmp_path / "email_cache.json")
+    cache.set_ready(
+        "asorenson@standardprocess.com",
+        task_page_id="task-ooo",
+        thread_id="THR-ooo-Email",
+        contact_page_id="c",
+        conversation_page_id="v",
+        extra={"gmail_thread_id": "gt-ooo"},
+    )
+    gmail = MagicMock()
+    gmail.parse_inbound_message.return_value = {
+        "sender": "asorenson@standardprocess.com",
+        "body": "I am out of the office through 9/28/26",
+        "subject": "Automatic reply: That sample Billy left with you",
+        "gmail_thread_id": "gt-ooo",
+        "gmail_message_id": "gm-ooo",
+        "message_id": "gm-ooo",
+        "classify": {
+            "kind": "auto_reply",
+            "reason": "Email自动回复（Out of Office）",
+            "is_human": False,
+        },
+    }
+    wh = MagicMock()
+    wh.build_email_payload.side_effect = lambda **kw: {
+        "taskId": kw["task_id"],
+        "threadId": kw["thread_id"],
+        "content": kw["content"],
+        "channel": "Email",
+        "messageId": "",
+        "extendedParameters": kw.get("extra_extended") or {},
+    }
+    wh.post_reply.return_value = {"ok": True}
+
+    skipped = ingest_gmail_messages(["gm-ooo"], gmail=gmail, cache=cache, reply_webhook=wh)
+    assert skipped[0]["reason"] == "duplicate_inbound"
+    gmail.parse_inbound_message.assert_not_called()
+
+    replayed = ingest_gmail_messages(
+        ["gm-ooo"],
+        force=True,
+        gmail=gmail,
+        cache=cache,
+        reply_webhook=wh,
+    )
+    assert replayed[0]["matched"] is True
+    assert wh.post_reply.call_args.args[0]["extendedParameters"]["autoReply"] is True
+    assert already_seen("EMAIL", "gm-ooo") is True
+
+
 def test_email_hard_bounce_fails_task(tmp_path, monkeypatch):
     from channel_orchestrator.inbound import handle_inbound_email
 

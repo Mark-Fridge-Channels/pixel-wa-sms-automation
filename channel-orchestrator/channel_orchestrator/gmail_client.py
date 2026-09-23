@@ -220,6 +220,14 @@ class GmailClient:
     def get_message(self, message_id: str, *, format: str = "full") -> dict[str, Any]:
         return self._request("GET", f"/messages/{message_id}", params={"format": format})
 
+    def list_message_ids(self, query: str, *, max_results: int = 5) -> list[str]:
+        data = self._request(
+            "GET",
+            "/messages",
+            params={"q": query, "maxResults": max(1, min(max_results, 20))},
+        )
+        return [str(m["id"]) for m in data.get("messages") or [] if m.get("id")]
+
     def latest_message_headers(self, thread_id: str) -> dict[str, str]:
         thread = self.get_thread(thread_id)
         messages = thread.get("messages") or []

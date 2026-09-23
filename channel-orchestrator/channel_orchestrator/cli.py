@@ -11,7 +11,7 @@ import uvicorn
 from .channels import normalize_channel
 from .config import settings
 from .gateway import SmsGatewayClient
-from .inbound import poll_gmail_inbound
+from .inbound import ingest_gmail_messages, poll_gmail_inbound
 from .runtime_settings import get_scan_interval_seconds
 from .scan_runtime import drain_until_idle, scan_and_enqueue, scheduler_tick
 from .scheduler import build_daily_plan, ny_today
@@ -103,6 +103,21 @@ def main() -> None:
 
     sub.add_parser("gmail-auth", help="One-time OAuth for Gmail mailbox (browser)")
     sub.add_parser("gmail-poll", help="Poll Gmail history once and ingest replies")
+    p_ingest = sub.add_parser(
+        "gmail-ingest",
+        help="Ingest one already-received Gmail message (replay a skipped auto-reply)",
+    )
+    p_ingest.add_argument("--message-id", default="", help="Gmail API message id")
+    p_ingest.add_argument(
+        "--query",
+        default="",
+        help="Gmail search query, used when --message-id is empty",
+    )
+    p_ingest.add_argument(
+        "--force",
+        action="store_true",
+        help="Replay even if this Gmail id was already marked seen",
+    )
     sub.add_parser(
         "sync-client-domains",
         help="Sync Follow-up Client → Client.Domain cache (full table)",
@@ -158,6 +173,25 @@ def main() -> None:
 
     if args.cmd == "gmail-poll":
         results = poll_gmail_inbound()
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+
+    if args.cmd == "gmail-ingest":
+        from .gmail_client import GmailClient
+
+        ids = [args.message_id.strip()] if args.message_id.strip() else []
+        if not ids:
+            query = (args.query or "").strip()
+            if not query:
+                raise SystemExit("请提供 --message-id 或 --query")
+            ids = GmailClient().list_message_ids(query, max_results=5)
+            if not ids:
+                raise SystemExit(f"Gmail 没有搜到邮件: {query}")
+            if len(ids) > 1:
+                raise SystemExit(
+                    "搜到多封邮件，请改用 --message-id 指定一封: " + ", ".join(ids)
+                )
+        results = ingest_gmail_messages(ids, force=bool(args.force))
         print(json.dumps(results, ensure_ascii=False, indent=2))
         return
 

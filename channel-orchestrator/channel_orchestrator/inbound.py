@@ -429,6 +429,89 @@ def handle_inbound_email(normalized: dict[str, Any], **kwargs: Any) -> dict[str,
     return handle_inbound_message(normalized, channel="EMAIL", **kwargs)
 
 
+def ingest_gmail_messages(
+    message_ids: list[str],
+    *,
+    force: bool = False,
+    gmail: Any | None = None,
+    notion: NotionClient | None = None,
+    cache: OutboundCache | None = None,
+    reply_webhook: ReplyWebhookClient | None = None,
+) -> list[dict[str, Any]]:
+    """Parse specific Gmail messages and run the email listen path.
+
+    History poll will not see a message again after the cursor moves on.
+    ``force`` clears the dedupe key left by an earlier skip (such as the
+    old auto-reply ignore) and ingests once more.
+    """
+    from .gmail_client import GmailClient
+    from .inbound_dedupe import already_seen, forget, seen_or_mark
+
+    gmail = gmail or GmailClient()
+    email_cache = cache or OutboundCache(channel="EMAIL")
+    results: list[dict[str, Any]] = []
+    for mid in message_ids:
+        mid = str(mid or "").strip()
+        if not mid:
+            continue
+        if already_seen("EMAIL", mid) and not force:
+            log.info("skip duplicate gmail ingest id=%s", mid)
+            results.append(
+                {
+                    "ok": True,
+                    "matched": False,
+                    "skipped": True,
+                    "reason": "duplicate_inbound",
+                    "gmail_message_id": mid,
+                }
+            )
+            continue
+        if force:
+            forget("EMAIL", mid)
+        try:
+            parsed = gmail.parse_inbound_message(mid)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to parse gmail message %s", mid)
+            results.append(
+                {
+                    "ok": False,
+                    "matched": False,
+                    "gmail_message_id": mid,
+                    "error": "parse_failed",
+                }
+            )
+            continue
+        if not parsed:
+            results.append(
+                {
+                    "ok": False,
+                    "matched": False,
+                    "gmail_message_id": mid,
+                    "error": "empty_message",
+                }
+            )
+            continue
+        result = handle_inbound_email(
+            parsed,
+            notion=notion,
+            cache=email_cache,
+            reply_webhook=reply_webhook,
+        )
+        result["gmail_message_id"] = mid
+        webhook = result.get("webhook") if isinstance(result.get("webhook"), dict) else {}
+        ingested = bool(result.get("matched") and webhook.get("ok") and not webhook.get("skipped"))
+        ingested = ingested or bool(result.get("cold") and result.get("ok"))
+        if ingested:
+            seen_or_mark(
+                "EMAIL",
+                mid,
+                body=str(parsed.get("body") or ""),
+                sender=str(parsed.get("sender") or ""),
+            )
+        results.append(result)
+    return results
+
+
 def poll_gmail_inbound(
     *,
     gmail: Any | None = None,
