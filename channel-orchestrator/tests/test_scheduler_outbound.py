@@ -610,6 +610,57 @@ def test_email_inbound_matches_gmail_thread(tmp_path, monkeypatch):
     assert wh.post_reply.call_args.args[0]["messageId"] == ""
 
 
+def test_email_auto_reply_is_ingested(tmp_path, monkeypatch):
+    from channel_orchestrator.inbound import handle_inbound_email
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "notion_token", "")
+    cache = OutboundCache(channel="EMAIL", path=tmp_path / "email_cache.json")
+    cache.set_ready(
+        "asorenson@standardprocess.com",
+        task_page_id="task-ooo",
+        thread_id="THR-ooo-Email",
+        contact_page_id="c",
+        conversation_page_id="v",
+        extra={"gmail_thread_id": "gt-ooo", "gmailThreadId": "gt-ooo"},
+    )
+    wh = MagicMock()
+    wh.build_email_payload.side_effect = lambda **kw: {
+        "taskId": kw["task_id"],
+        "threadId": kw["thread_id"],
+        "content": kw["content"],
+        "channel": "Email",
+        "subject": kw.get("subject") or "",
+        "messageId": "",
+        "extendedParameters": kw.get("extra_extended") or {},
+    }
+    wh.post_reply.return_value = {"ok": True}
+    result = handle_inbound_email(
+        {
+            "sender": "Sorenson, Andy <asorenson@standardprocess.com>",
+            "body": "I am out of the office through 9/28/26",
+            "subject": "Automatic reply: That sample Billy left with you",
+            "gmail_thread_id": "gt-ooo",
+            "gmail_message_id": "gm-ooo",
+            "classify": {
+                "kind": "auto_reply",
+                "reason": "Email自动回复（Out of Office）",
+                "is_human": False,
+            },
+        },
+        notion=MagicMock(),
+        cache=cache,
+        reply_webhook=wh,
+        write_notion=False,
+    )
+    assert result["matched"] is True
+    assert result.get("skipped") is not True
+    wh.post_reply.assert_called_once()
+    ext = wh.post_reply.call_args.args[0]["extendedParameters"]
+    assert ext["autoReply"] is True
+    assert wh.build_email_payload.call_args.kwargs["subject"].startswith("Automatic reply:")
+
+
 def test_email_hard_bounce_fails_task(tmp_path, monkeypatch):
     from channel_orchestrator.inbound import handle_inbound_email
 
@@ -674,6 +725,14 @@ def test_email_classify_hard_vs_soft():
         body="Sounds good",
     )
     assert human["kind"] == "human"
+    auto = classify_inbound_email(
+        sender="asorenson@standardprocess.com",
+        subject="Automatic reply: That sample Billy left with you",
+        body="I am out of the office through 9/28/26",
+        headers={"auto-submitted": "auto-generated"},
+    )
+    assert auto["kind"] == "auto_reply"
+    assert auto["is_human"] is False
 
 
 def test_email_proxy_reply_same_org_thread(tmp_path, monkeypatch):

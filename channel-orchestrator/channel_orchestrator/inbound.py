@@ -139,7 +139,9 @@ def handle_inbound_message(
             sender=sender if sender is not None else (normalize_email(sender_raw) if ch == "EMAIL" else normalize_e164(sender_raw)) or str(sender_raw or "") or None,
         )
 
-    # Email: classify bounce / auto-reply before treating as human reply
+    # Email: bounce and empty system receipts stop here.
+    # Auto-replies continue into the same listen path as human replies.
+    email_kind = "human"
     if ch == "EMAIL":
         cls = normalized.get("classify") or classify_inbound_email(
             sender=normalize_email(sender_raw) or str(sender_raw or ""),
@@ -147,6 +149,7 @@ def handle_inbound_message(
             body=body,
         )
         kind = cls.get("kind") or "human"
+        email_kind = kind
         if kind in {"hard_bounce", "soft_bounce"}:
             matched = cache.get_ready_by_gmail_thread(gmail_thread_id)
             if not matched:
@@ -196,7 +199,7 @@ def handle_inbound_message(
                 },
                 preview=subject or body,
             )
-        if kind in {"auto_reply", "system_other"}:
+        if kind == "system_other":
             log.info("email non-human ignored kind=%s reason=%s", kind, cls.get("reason"))
             return done(
                 {
@@ -208,6 +211,12 @@ def handle_inbound_message(
                     "event": {"kind": kind, "reason": cls.get("reason")},
                 },
                 preview=subject or body,
+            )
+        if kind == "auto_reply":
+            log.info(
+                "email auto-reply inbound sender=%s subject=%s",
+                normalize_email(sender_raw) or sender_raw,
+                subject,
             )
 
     party_key: str | None
@@ -272,7 +281,7 @@ def handle_inbound_message(
         body = f"[{media_type}]"
 
     if ch == "EMAIL":
-        # After bounce/auto skip: upload attachments for Task replies or cold inbound.
+        # After bounce / system-receipt skip: upload attachments for Task replies or cold inbound.
         email_attachments, email_attachment_notices, body = _enrich_email_attachments(normalized)
 
     label = channel_display_name(ch)
@@ -317,6 +326,7 @@ def handle_inbound_message(
                     "proxyReply": reply_meta.get("proxyReply"),
                     "sameOrgDomain": reply_meta.get("sameOrgDomain"),
                     "unexpectedSender": reply_meta.get("unexpectedSender"),
+                    "autoReply": True if email_kind == "auto_reply" else None,
                 },
                 attachments=email_attachments or None,
             )

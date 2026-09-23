@@ -84,7 +84,7 @@ def classify_inbound_email(
         if _match_any(blob, _SOFT_BODY):
             return _result("soft_bounce", "Email软退信：暂时无法投递")
         if _match_any(subj_l, _AUTO_SUBJECT) or "vacation" in blob:
-            return _result("auto_reply", "Email自动回复（Out of Office），已忽略")
+            return _result("auto_reply", "Email自动回复（Out of Office）")
         return _result("system_other", "Email系统回执（非人工），已忽略")
 
     if "mailer-daemon@" in from_l or "postmaster@" in from_l:
@@ -99,7 +99,7 @@ def classify_inbound_email(
         return _result("soft_bounce", "Email软退信：暂时无法投递")
 
     if _match_any(subj_l, _AUTO_SUBJECT):
-        return _result("auto_reply", "Email自动回复（Out of Office），已忽略")
+        return _result("auto_reply", "Email自动回复（Out of Office）")
 
     if headers.get("x-auto-response-suppress") and not body_l.strip():
         return _result("system_other", "Email系统回执（空正文），已忽略")
