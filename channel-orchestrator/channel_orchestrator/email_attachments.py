@@ -16,7 +16,15 @@ from .s3_media import S3Uploader
 log = logging.getLogger(__name__)
 
 DEFAULT_EMAIL_MIME = frozenset(
-    {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+    {
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "video/mp4",
+        "video/quicktime",
+        "video/3gpp",
+    }
 )
 
 
@@ -92,6 +100,9 @@ def _ext_for_mime(mime: str, filename: str | None = None) -> str:
         "image/jpeg": ".jpg",
         "image/png": ".png",
         "image/webp": ".webp",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/3gpp": ".3gp",
     }.get(mime.lower(), mimetypes.guess_extension(mime) or ".bin")
 
 

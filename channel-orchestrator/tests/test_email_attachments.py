@@ -33,6 +33,24 @@ def test_parse_attachments_json():
     assert items[0]["name"] == "q.pdf"
 
 
+def test_validate_video_mime():
+    assert validate_attachment_bytes(filename="a.mp4", mime="video/mp4", size=100) is None
+    assert validate_attachment_bytes(filename="a.mov", mime="video/quicktime", size=100) is None
+    assert validate_attachment_bytes(filename="a.3gp", mime="video/3gpp", size=100) is None
+    ok, reason = validate_attachment_meta(
+        {
+            "id": "vid",
+            "kind": "video",
+            "name": "clip.mov",
+            "mimeType": "video/quicktime",
+            "size": 100,
+            "url": "https://bucket.s3.us-east-1.amazonaws.com/videos/vid.mov",
+        }
+    )
+    assert reason is None
+    assert ok and ok["kind"] == "video"
+
+
 def test_validate_bad_mime():
     reason = validate_attachment_bytes(
         filename="x.exe",
