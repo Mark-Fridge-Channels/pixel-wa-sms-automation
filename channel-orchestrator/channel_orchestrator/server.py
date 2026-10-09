@@ -64,6 +64,17 @@ def _check_probe_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _check_external_send_token(authorization: str | None) -> None:
+    token = (settings.external_send_api_token or settings.wa_api_token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail="external send API token not configured (set EXTERNAL_SEND_API_TOKEN or WA_API_TOKEN)",
+        )
+    if authorization != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 def _monitor_token() -> str:
     return (settings.monitor_token or settings.wa_api_token or "").strip()
 
@@ -543,6 +554,46 @@ async def wa_heartbeat(
     except Exception:  # noqa: BLE001
         log.exception("device alert after heartbeat failed")
     return JSONResponse({"ok": True, "time": _now_iso()})
+
+
+@app.post("/api/email/external-sent")
+async def email_external_sent(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Register an email another system already sent and recorded as a Completed Notion task.
+
+    Body: {email, taskId, threadId, gmailThreadId?, gmailMessageId?, subject?, sentAt?,
+    conversationId?, contactId?, source?}
+    """
+    _check_external_send_token(authorization)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected json object")
+    from .external_send import ExternalSendError, register_external_email_sent
+
+    def pick(*keys: str) -> Any:
+        for k in keys:
+            if body.get(k) not in (None, ""):
+                return body[k]
+        return None
+
+    try:
+        result = register_external_email_sent(
+            email=pick("email", "to"),
+            task_id=pick("taskId", "task_id"),
+            thread_id=pick("threadId", "thread_id"),
+            gmail_thread_id=pick("gmailThreadId", "gmail_thread_id"),
+            gmail_message_id=pick("gmailMessageId", "gmail_message_id"),
+            subject=pick("subject"),
+            sent_at=pick("sentAt", "sent_at"),
+            conversation_page_id=pick("conversationId", "conversation_id"),
+            contact_page_id=pick("contactId", "contact_id"),
+            source=str(pick("source") or "external"),
+        )
+    except ExternalSendError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return JSONResponse(result)
 
 
 @app.get("/api/monitor/summary")

@@ -37,6 +37,79 @@ def _channel_list(raw: str) -> list[str]:
     return [normalize_channel(raw)]
 
 
+def _find_sent_gmail_id(gmail, email: str, subject: str | None) -> str | None:
+    from .email_util import normalize_subject
+    from .external_send import _gmail_meta
+
+    want = normalize_subject(subject) if subject else ""
+    for mid in gmail.list_message_ids(f"in:sent to:{email} newer_than:60d", max_results=10):
+        if not want:
+            return mid
+        if normalize_subject(_gmail_meta(gmail, mid).get("subject") or "") == want:
+            return mid
+    return None
+
+
+def _register_email_sent(args: argparse.Namespace) -> dict:
+    from .external_send import register_external_email_sent
+    from .gmail_client import GmailClient
+    from .notion_client import NotionClient
+
+    import re
+
+    from .notion_props import props, rich_text_plain
+
+    notion = NotionClient()
+    task_id = args.task_id.strip()
+    status = notion.get_task_status(task_id)
+    resolved = notion.resolve_task_for_send(task_id)
+    if resolved.channel != "EMAIL":
+        raise SystemExit(f"任务不是 Email 渠道: {resolved.channel}")
+    # superExhibition links the Task to an arbitrary Follow-up Contact; the real
+    # recipient is the "To: x" line it writes into Task Notes.
+    notes = rich_text_plain(props(notion.get_page(task_id)).get("Notes")) or ""
+    notes_to = re.search(r"^To:\s*(\S+@\S+)", notes, flags=re.M)
+    email = args.email.strip() or (notes_to.group(1) if notes_to else None) or resolved.email
+    thread_id = args.thread_id.strip() or resolved.thread_id
+    subject = args.subject.strip() or resolved.subject
+    ext = resolved.extended_parameters or {}
+    gmail_thread_id = args.gmail_thread_id.strip() or ext.get("gmailThreadId") or ext.get("gmail_thread_id")
+    gmail_message_id = args.gmail_message_id.strip() or ext.get("gmailMessageId") or ext.get("gmail_message_id")
+    if not email or not thread_id:
+        raise SystemExit(f"无法从任务解析收件人或 Thread ID: email={email!r} thread={thread_id!r}")
+
+    gmail = GmailClient()
+    if not gmail_message_id and not gmail_thread_id:
+        gmail_message_id = _find_sent_gmail_id(gmail, email, subject)
+
+    plan = {
+        "task_id": task_id,
+        "task_status": status,
+        "email": email,
+        "thread_id": thread_id,
+        "conversation_id": resolved.conversation_id,
+        "subject": subject,
+        "gmail_thread_id": gmail_thread_id,
+        "gmail_message_id": gmail_message_id,
+        "warning": None if status == "Completed" else "任务不是 Completed，Portal 会拒收回信（409）",
+    }
+    if args.dry_run:
+        return {"dry_run": True, **plan}
+    return register_external_email_sent(
+        email=email,
+        task_id=task_id,
+        thread_id=thread_id,
+        gmail_thread_id=gmail_thread_id,
+        gmail_message_id=gmail_message_id,
+        subject=subject,
+        sent_at=args.sent_at.strip() or None,
+        contact_page_id=resolved.contact_id,
+        conversation_page_id=resolved.conversation_id,
+        source="cli",
+        gmail=gmail,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="channel_orchestrator")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -118,6 +191,18 @@ def main() -> None:
         action="store_true",
         help="Replay even if this Gmail id was already marked seen",
     )
+    p_ext = sub.add_parser(
+        "register-email-sent",
+        help="Register an email sent outside the orchestrator (fills the Email outbound cache from a Notion task)",
+    )
+    p_ext.add_argument("--task-id", required=True, help="Notion task page id (Completed Email task)")
+    p_ext.add_argument("--email", default="", help="Recipient; default from the task's Key Person")
+    p_ext.add_argument("--thread-id", default="", help="Portal Thread ID; default from the task's Conversation")
+    p_ext.add_argument("--gmail-message-id", default="", help="Gmail API id of the sent message")
+    p_ext.add_argument("--gmail-thread-id", default="")
+    p_ext.add_argument("--subject", default="")
+    p_ext.add_argument("--sent-at", default="", help="ISO time; default from Gmail")
+    p_ext.add_argument("--dry-run", action="store_true", help="Resolve and print only; do not write the cache")
     sub.add_parser(
         "sync-client-domains",
         help="Sync Follow-up Client → Client.Domain cache (full table)",
@@ -193,6 +278,10 @@ def main() -> None:
                 )
         results = ingest_gmail_messages(ids, force=bool(args.force))
         print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+
+    if args.cmd == "register-email-sent":
+        print(json.dumps(_register_email_sent(args), ensure_ascii=False, indent=2, default=str))
         return
 
     if args.cmd == "sync-client-domains":

@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     wa_probe_api_token: str = ""
     # Optional; falls back to wa_api_token for /api/monitor/settings
     monitor_token: str = ""
+    # Bearer token for POST /api/email/external-sent; empty → fall back to wa_api_token.
+    # The endpoint always requires a non-empty configured token.
+    external_send_api_token: str = ""
 
     gmail_client_id: str = ""
     gmail_client_secret: str = ""
