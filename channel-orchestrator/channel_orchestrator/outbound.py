@@ -462,13 +462,16 @@ def execute_resolved_email(
         notion.update_task_status(resolved.task_id, "Failed", ended_at=now, notes=msg)
         return {"ok": False, "status": "failed", "reason": msg, "task_id": resolved.task_id}
 
+    pending_extra: dict[str, Any] = {"subject": subject}
+    if gmail_thread_id:
+        pending_extra["gmail_thread_id"] = gmail_thread_id
     cache.set_pending(
         resolved.email,
         task_page_id=resolved.task_id,
         thread_id=resolved.thread_id,
         contact_page_id=resolved.contact_id,
         conversation_page_id=resolved.conversation_id,
-        extra={"gmail_thread_id": gmail_thread_id} if gmail_thread_id else None,
+        extra=pending_extra,
     )
     notion.update_task_status(resolved.task_id, "In Progress")
     try:
@@ -530,6 +533,7 @@ def execute_resolved_email(
             "gmail_message_id": gmid,
             "gmailThreadId": gtid,
             "gmailMessageId": gmid,
+            "subject": subject,
         },
     )
     return {

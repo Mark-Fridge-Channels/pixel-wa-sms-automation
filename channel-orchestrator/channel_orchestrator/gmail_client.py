@@ -417,6 +417,14 @@ class GmailClient:
                 received_at = datetime.fromtimestamp(int(internal_ts) / 1000, tz=timezone.utc).isoformat()
             except (TypeError, ValueError):
                 received_at = None
+        failed_recipients: list[str] = []
+        if auto_cls.get("kind") in {"hard_bounce", "soft_bounce"}:
+            failed_recipients = _extract_failed_recipients(
+                headers,
+                body,
+                self._dsn_texts(message_id, payload),
+                exclude={e for e in (normalize_email(settings.gmail_user), normalize_email(self.user)) if e},
+            )
         return {
             "sender": sender,
             "from_raw": from_raw,
@@ -434,7 +442,22 @@ class GmailClient:
             "classify": auto_cls,
             "label_ids": label_ids,
             "attachment_parts": _list_attachment_parts(payload),
+            "failed_recipients": failed_recipients,
         }
+
+    def _dsn_texts(self, message_id: str, payload: dict[str, Any]) -> list[str]:
+        texts: list[str] = []
+        for part in _list_dsn_parts(payload):
+            body = part.get("body") or {}
+            try:
+                if body.get("data"):
+                    texts.append(_b64url_decode(body["data"]))
+                elif body.get("attachmentId"):
+                    raw = self.download_attachment(message_id, body["attachmentId"])
+                    texts.append(raw.decode("utf-8", errors="replace"))
+            except Exception:  # noqa: BLE001
+                log.warning("dsn part read failed message=%s", message_id, exc_info=True)
+        return texts
 
     def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
         data = self._request(
@@ -451,6 +474,8 @@ class GmailClient:
 def _extract_plain_body(payload: dict[str, Any]) -> str:
     if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
         return _b64url_decode(payload["body"]["data"])
+    if payload.get("mimeType") == "text/html" and payload.get("body", {}).get("data"):
+        return html_to_plain_text(_b64url_decode(payload["body"]["data"]))
     parts = payload.get("parts") or []
     plain = ""
     html = ""
@@ -470,6 +495,66 @@ def _extract_plain_body(payload: dict[str, Any]) -> str:
     if html:
         return re.sub(r"<[^>]+>", " ", html).strip()
     return ""
+
+
+_DSN_RECIPIENT_RE = re.compile(
+    r"^(?:final|original)-recipient:\s*rfc822;\s*<?([^\s<>;]+@[^\s<>;]+)>?",
+    re.I | re.M,
+)
+_BODY_FAILED_RE = (
+    re.compile(r"(?:wasn'?t|was not|couldn'?t be|could not be)\s+delivered\s+to\s+<?([^\s<>,;]+@[^\s<>,;]+)", re.I),
+    re.compile(
+        r"delivery\s+to\s+the\s+following\s+recipients?\s+failed[^\n]*\n\s*(?:\n\s*)*<?([^\s<>,;]+@[^\s<>,;]+)",
+        re.I,
+    ),
+    re.compile(r"(?:address|recipient)\s+(?:not\s+found|rejected)[^\n]*?<?([^\s<>,;]+@[^\s<>,;]+)", re.I),
+)
+_NOT_RECIPIENT = ("mailer-daemon@", "postmaster@")
+
+
+def _extract_failed_recipients(
+    headers: dict[str, str],
+    body: str,
+    dsn_texts: list[str],
+    *,
+    exclude: set[str] | None = None,
+) -> list[str]:
+    """Recipients a bounce says could not be reached (X-Failed-Recipients / DSN / body text)."""
+    found: list[str] = []
+
+    def add(raw: str | None) -> None:
+        e = normalize_email(raw)
+        if not e or e in found:
+            return
+        if exclude and e in exclude:
+            return
+        if any(e.startswith(p) for p in _NOT_RECIPIENT):
+            return
+        found.append(e)
+
+    for e in extract_emails_from_header_value(headers.get("x-failed-recipients")):
+        add(e)
+    for text in dsn_texts:
+        for m in _DSN_RECIPIENT_RE.finditer(text):
+            add(m.group(1))
+    for pattern in _BODY_FAILED_RE:
+        for m in pattern.finditer(body or ""):
+            add(m.group(1))
+    return found
+
+
+def _list_dsn_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+
+    def walk(part: dict[str, Any]) -> None:
+        if (part.get("mimeType") or "").lower() == "message/delivery-status":
+            out.append(part)
+        for child in part.get("parts") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    walk(payload)
+    return out
 
 
 def _list_attachment_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:

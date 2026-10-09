@@ -8,7 +8,7 @@ from typing import Any
 
 from .channels import normalize_channel
 from .config import settings
-from .email_util import normalize_email
+from .email_util import normalize_email, same_org_domain
 from .phone import normalize_e164
 
 
@@ -192,6 +192,27 @@ class OutboundCache:
         if not entry.get("task_page_id") or not entry.get("thread_id"):
             return None
         return entry
+
+    def list_ready_same_org(
+        self,
+        party_raw: str | None,
+        *,
+        public_domains: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Ready Email rows whose recipient shares a non-public org domain with [party_raw]."""
+        frm = normalize_email(party_raw)
+        if not frm:
+            return []
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            for entry in self._data.values():
+                if entry.get("state") != self.STATE_READY:
+                    continue
+                if not entry.get("task_page_id") or not entry.get("thread_id"):
+                    continue
+                if same_org_domain(entry.get("email"), frm, public_domains=public_domains):
+                    out.append(dict(entry))
+        return out
 
     def get_ready_by_gmail_thread(self, gmail_thread_id: str | None) -> dict[str, Any] | None:
         if not gmail_thread_id:

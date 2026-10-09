@@ -12,6 +12,7 @@ from .email_util import (
     classify_email_reply_relation,
     normalize_email,
     parse_public_domains,
+    subject_matches_outbound,
 )
 from .exec_log import log_inbound_event
 from .email_attachments import EmailAttachmentPipeline, append_content_notices
@@ -53,6 +54,39 @@ def _enrich_email_attachments(normalized: dict[str, Any]) -> tuple[list[dict[str
     normalized["attachment_notices"] = notices
     normalized["body"] = body2
     return attachments, notices, body2
+
+
+def _unique_task(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    by_task = {str(e.get("task_page_id")): e for e in entries if e.get("task_page_id")}
+    return next(iter(by_task.values())) if len(by_task) == 1 else None
+
+
+def _match_bounce_recipient(cache: OutboundCache, failed_recipients: Any) -> dict[str, Any] | None:
+    """Bounce outside the sent thread: the address it names must be one sent Task."""
+    if not isinstance(failed_recipients, list):
+        return None
+    hits: list[dict[str, Any]] = []
+    for raw in failed_recipients:
+        entry = cache.get(str(raw))
+        if entry and entry.get("state") == OutboundCache.STATE_READY and entry.get("thread_id"):
+            hits.append(entry)
+    return _unique_task(hits)
+
+
+def _match_same_org_subject(
+    cache: OutboundCache,
+    party_key: str,
+    subject: str,
+    *,
+    public_domains: set[str],
+) -> dict[str, Any] | None:
+    """New-thread reply from a colleague at the recipient's org, carrying our outbound subject."""
+    candidates = [
+        entry
+        for entry in cache.list_ready_same_org(party_key, public_domains=public_domains)
+        if subject_matches_outbound(subject, entry.get("subject"))
+    ]
+    return _unique_task(candidates)
 
 
 def _inbound_status(result: dict[str, Any]) -> tuple[str, bool]:
@@ -151,10 +185,18 @@ def handle_inbound_message(
         kind = cls.get("kind") or "human"
         email_kind = kind
         if kind in {"hard_bounce", "soft_bounce"}:
+            failed_named = {
+                e for e in (normalize_email(str(x)) for x in normalized.get("failed_recipients") or []) if e
+            }
             matched = cache.get_ready_by_gmail_thread(gmail_thread_id)
-            if not matched:
-                # fallback: sometimes bounce From is mailer-daemon; try original recipient in body later
+            bounce_matched_by = "gmail_thread" if matched else ""
+            if matched and failed_named and normalize_email(matched.get("email")) not in failed_named:
+                # Same thread, but the DSN names a Cc / other address — the To recipient was delivered.
                 matched = None
+                bounce_matched_by = ""
+            if not matched:
+                matched = _match_bounce_recipient(cache, normalized.get("failed_recipients"))
+                bounce_matched_by = "failed_recipient" if matched else ""
             if matched:
                 bounce_result = fail_email_task_from_bounce(
                     cache_entry=matched,
@@ -178,14 +220,18 @@ def handle_inbound_message(
                             "kind": kind,
                             "reason": cls.get("reason"),
                             "gmail_thread_id": gmail_thread_id,
+                            "matched_by": bounce_matched_by,
+                            "failed_recipient": matched.get("email"),
                         },
                     },
                     preview=subject or body,
                 )
+            failed = list(normalized.get("failed_recipients") or [])
             log.info(
-                "email bounce unmatched kind=%s gmail_thread=%s reason=%s",
+                "email bounce unmatched kind=%s gmail_thread=%s failed_recipients=%s reason=%s",
                 kind,
                 gmail_thread_id,
+                failed,
                 cls.get("reason"),
             )
             return done(
@@ -195,7 +241,11 @@ def handle_inbound_message(
                     "bounce": True,
                     "kind": kind,
                     "webhook": {"ok": True, "skipped": True, "reason": "bounce_unmatched"},
-                    "event": {"kind": kind, "reason": cls.get("reason")},
+                    "event": {
+                        "kind": kind,
+                        "reason": cls.get("reason"),
+                        "failed_recipients": failed,
+                    },
                 },
                 preview=subject or body,
             )
@@ -224,14 +274,17 @@ def handle_inbound_message(
     reply_meta: dict[str, Any] = {}
     if ch == "EMAIL":
         party_key = normalize_email(sender_raw)
+        pubs = parse_public_domains(settings.email_public_domains)
         matched = cache.get_ready_by_gmail_thread(gmail_thread_id)
         matched_by = "gmail_thread" if matched else ""
         if not matched and party_key:
             matched = cache.get_ready_for_reply(party_key)
             matched_by = "email_exact" if matched else ""
+        if not matched and party_key:
+            matched = _match_same_org_subject(cache, party_key, subject, public_domains=pubs)
+            matched_by = "domain_subject" if matched else ""
         if matched:
             outbound_to = matched.get("email")
-            pubs = parse_public_domains(settings.email_public_domains)
             reply_meta = classify_email_reply_relation(
                 outbound_to=outbound_to,
                 reply_from=party_key,

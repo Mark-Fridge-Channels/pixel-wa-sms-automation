@@ -170,6 +170,38 @@ def same_org_domain(
     return d1.endswith("." + d2) or d2.endswith("." + d1)
 
 
+_SUBJECT_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:re|fw|fwd|aw|wg|sv|antw|automatic\s*reply|auto[\-\s]?reply|autoreply"
+    r"|out\s*of\s*(?:the\s*)?office)\s*[:：]"
+    r"|\[[^\]]{1,40}\]\s*[:：]?"
+    r")\s*",
+    re.I,
+)
+_SUBJECT_QUOTES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"', "\u2014": "-", "\u2013": "-"})
+_SUBJECT_MIN_LEN = 12
+
+
+def normalize_subject(raw: str | None) -> str:
+    """Strip Re:/Fwd:/Automatic reply:/[External] prefixes; fold quotes and whitespace."""
+    s = str(raw or "").translate(_SUBJECT_QUOTES)
+    prev = None
+    while prev != s:
+        prev = s
+        s = _SUBJECT_PREFIX_RE.sub("", s, count=1)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def subject_matches_outbound(inbound_subject: str | None, outbound_subject: str | None) -> bool:
+    """Inbound subject carries the outbound subject (prefix text like "I'm at NACS!" allowed)."""
+    out = normalize_subject(outbound_subject)
+    if len(out) < _SUBJECT_MIN_LEN:
+        return False
+    inbound = str(inbound_subject or "").translate(_SUBJECT_QUOTES)
+    inbound = re.sub(r"\s+", " ", inbound).strip().lower()
+    return out in inbound or out == normalize_subject(inbound_subject)
+
+
 def classify_email_reply_relation(
     *,
     outbound_to: str | None,
@@ -180,7 +212,7 @@ def classify_email_reply_relation(
 ) -> dict[str, Any]:
     """Describe how reply From relates to outbound recipient.
 
-    matched_by: gmail_thread | email_exact
+    matched_by: gmail_thread | email_exact | domain_subject
     """
     out = normalize_email(outbound_to)
     frm = normalize_email(reply_from)
@@ -195,6 +227,17 @@ def classify_email_reply_relation(
             "sameOrgDomain": False,
             "unexpectedSender": False,
             "accept": True,
+        }
+
+    if matched_by == "domain_subject":
+        return {
+            "replyMatch": "domain_subject",
+            "outboundTo": out,
+            "replyFrom": frm,
+            "proxyReply": bool(frm and out and frm != out),
+            "sameOrgDomain": True,
+            "unexpectedSender": False,
+            "accept": same_org_domain(out, frm, public_domains=pubs),
         }
 
     # gmail_thread match

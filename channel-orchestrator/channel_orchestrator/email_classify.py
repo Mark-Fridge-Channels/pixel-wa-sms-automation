@@ -76,7 +76,7 @@ def classify_inbound_email(
     body_l = (body or "").lower()
     blob = f"{subj_l}\n{body_l}\n{from_l}"
 
-    auto = (headers.get("auto-submitted") or "").lower()
+    auto = (headers.get("auto-submitted") or "").strip().lower()
     if auto and auto != "no":
         # Delivery Status Notification often has auto-submitted
         if _match_any(blob, _HARD_SUBJECT) or _match_any(blob, _HARD_BODY):
@@ -85,6 +85,9 @@ def classify_inbound_email(
             return _result("soft_bounce", "Email软退信：暂时无法投递")
         if _match_any(subj_l, _AUTO_SUBJECT) or "vacation" in blob:
             return _result("auto_reply", "Email自动回复（Out of Office）")
+        # RFC 3834: auto-replied = responder answering our mail (OOO with a custom subject).
+        if auto.startswith("auto-replied") or _is_autoresponder(headers):
+            return _result("auto_reply", "Email自动回复（Auto-Submitted: auto-replied）")
         return _result("system_other", "Email系统回执（非人工），已忽略")
 
     if "mailer-daemon@" in from_l or "postmaster@" in from_l:
@@ -101,10 +104,21 @@ def classify_inbound_email(
     if _match_any(subj_l, _AUTO_SUBJECT):
         return _result("auto_reply", "Email自动回复（Out of Office）")
 
+    if _is_autoresponder(headers):
+        return _result("auto_reply", "Email自动回复（X-Autoreply）")
+
     if headers.get("x-auto-response-suppress") and not body_l.strip():
         return _result("system_other", "Email系统回执（空正文），已忽略")
 
     return _result("human", "")
+
+
+def _is_autoresponder(headers: dict[str, str]) -> bool:
+    if (headers.get("x-autoreply") or "").strip().lower() in {"yes", "true", "1"}:
+        return True
+    if headers.get("x-autorespond"):
+        return True
+    return (headers.get("precedence") or "").strip().lower() == "auto_reply"
 
 
 def _match_any(text: str, patterns: tuple[str, ...]) -> bool:
