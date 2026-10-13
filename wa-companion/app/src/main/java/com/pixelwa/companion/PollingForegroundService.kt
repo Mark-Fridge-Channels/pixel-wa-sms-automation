@@ -146,9 +146,12 @@ class PollingForegroundService : Service() {
 
     private fun pollOnce() {
         if (!busy.compareAndSet(false, true)) return
+        var jobRunning = false
         try {
             maybeWatchVpn()
             val job = api.nextJob() ?: return
+            jobRunning = true
+            showBusyNotice()
             Log.i(TAG, "got job ${job.id} type=${job.jobType} -> ${job.phone}")
             val wakeMs = when {
                 job.isProbe -> 60_000L
@@ -192,6 +195,7 @@ class PollingForegroundService : Service() {
             Log.e(TAG, "poll failed", e)
             SendAccessibilityService.leaveChatToList()
         } finally {
+            if (jobRunning) clearBusyNotice()
             screenWake.release()
             busy.set(false)
         }
@@ -270,15 +274,21 @@ class PollingForegroundService : Service() {
         val mediaUrl = job.mediaUrl ?: return false to "缺少 mediaUrl"
         val mediaType = job.mediaType ?: return false to "缺少 mediaType"
         Log.i(TAG, "download media type=$mediaType url=${mediaUrl.take(80)}")
+        val downloadStarted = System.currentTimeMillis()
         val file = MediaHelper.downloadToCache(this, mediaUrl, mediaType)
             ?: return false to "媒体下载失败"
+        Log.i(
+            TAG,
+            "media ready in ${System.currentTimeMillis() - downloadStarted}ms, " +
+                "send confirm timeout=${MEDIA_SEND_TIMEOUT_SEC}s",
+        )
         val digits = job.phone.filter { it.isDigit() }
         val mime = MediaHelper.mimeFor(mediaType, file.name)
         val contentUri = MediaHelper.fileProviderUri(this, file)
         return launchAndAwaitSend(
             job = job,
             pendingText = job.text,
-            timeoutSec = 180,
+            timeoutSec = MEDIA_SEND_TIMEOUT_SEC,
         ) {
             grantUriPermission(
                 "com.whatsapp",
@@ -329,11 +339,12 @@ class PollingForegroundService : Service() {
         val finished = latch.await(timeoutSec, TimeUnit.SECONDS)
         if (!finished) {
             val want = SendCoordinator.pendingText?.trim().orEmpty()
-            if (want.isNotEmpty()) {
-                val bubbles = SendAccessibilityService.snapshotMessages()
+            val needle = want.take(40)
+            val bubbles = SendAccessibilityService.snapshotConversationBubbles()
+            if (bubbles != null && needle.length >= 12) {
                 val seen = bubbles.any { bubble ->
                     val b = bubble.trim()
-                    b == want || b.contains(want) || want.contains(b.take(40))
+                    b == want || b.contains(needle)
                 }
                 if (seen) {
                     Log.i(TAG, "timeout but message bubble found; treat as success")
@@ -345,7 +356,7 @@ class PollingForegroundService : Service() {
             if (job.hasMedia && want.isEmpty()) {
                 Log.w(TAG, "media send timeout without caption; treating as UNCERTAIN")
             }
-            val msg = "UNCERTAIN:发送超时（${timeoutSec}s 未确认，请勿直接重试）"
+            val msg = "UNCERTAIN:发送超时（发送确认 ${timeoutSec}s 未确认，不含下载，请勿直接重试）"
             SendCoordinator.onSendAttempted(false, msg)
             return false to msg
         }
@@ -357,18 +368,32 @@ class PollingForegroundService : Service() {
      * Reply time = device clock when the bubble is first seen (not UI clock text).
      */
     private fun dwellAndScrapeReplies(phone: String, sentText: String) {
-        val known = SendAccessibilityService.snapshotMessages().toMutableSet()
-        known.add(sentText.trim())
+        var known: MutableSet<String>? = null
         val deadline = System.currentTimeMillis() + DWELL_MS
-        Log.i(TAG, "dwell scrape start phone=$phone known=${known.size}")
+        Log.i(TAG, "dwell scrape start phone=$phone")
         while (System.currentTimeMillis() < deadline) {
             try {
                 Thread.sleep(SCRAPE_INTERVAL_MS)
             } catch (_: InterruptedException) {
                 break
             }
-            val nowVisible = SendAccessibilityService.snapshotMessages()
+            if (System.currentTimeMillis() >= deadline) break
+            val nowVisible = SendAccessibilityService.snapshotConversationBubbles()
+            if (nowVisible == null) {
+                if (known != null) {
+                    Log.i(TAG, "dwell stop: left conversation")
+                    break
+                }
+                continue
+            }
+            if (known == null) {
+                known = nowVisible.toMutableSet()
+                known.add(sentText.trim())
+                Log.i(TAG, "dwell baseline bubbles=${known.size}")
+                continue
+            }
             for (text in nowVisible) {
+                if (System.currentTimeMillis() >= deadline) break
                 if (text in known) continue
                 known.add(text)
                 if (!InboundDeduper.shouldReport(phone, text)) {
@@ -396,9 +421,48 @@ class PollingForegroundService : Service() {
                 NotificationManager.IMPORTANCE_LOW
             )
         )
+        nm.createNotificationChannel(
+            NotificationChannel(
+                BUSY_CHANNEL_ID,
+                getString(R.string.notif_busy_channel),
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = getString(R.string.notif_busy_text)
+                setShowBadge(false)
+            }
+        )
     }
 
-    private fun buildNotification(on: Boolean, vpnOk: Boolean = true): Notification {
+    private fun showBusyNotice() {
+        val nm = getSystemService(NotificationManager::class.java)
+        val open = PendingIntent.getActivity(
+            this,
+            1,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notice = NotificationCompat.Builder(this, BUSY_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle(getString(R.string.notif_busy_title))
+            .setContentText(getString(R.string.notif_busy_text))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(getString(R.string.notif_busy_text)))
+            .setContentIntent(open)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .build()
+        nm.notify(BUSY_NOTIF_ID, notice)
+        nm.notify(NOTIF_ID, buildNotification(on = true, busy = true))
+    }
+
+    private fun clearBusyNotice() {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.cancel(BUSY_NOTIF_ID)
+        nm.notify(NOTIF_ID, buildNotification(prefs.automationEnabled))
+    }
+
+    private fun buildNotification(on: Boolean, vpnOk: Boolean = true, busy: Boolean = false): Notification {
         val open = PendingIntent.getActivity(
             this,
             0,
@@ -406,6 +470,7 @@ class PollingForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         val text = when {
+            busy -> getString(R.string.notif_busy_text)
             !on -> "OFF"
             vpnOk -> "ON — polling jobs"
             else -> "ON — VPN recovering"
@@ -422,11 +487,15 @@ class PollingForegroundService : Service() {
     companion object {
         private const val TAG = "WaPoll"
         private const val CHANNEL_ID = "wa_companion"
+        private const val BUSY_CHANNEL_ID = "wa_companion_busy"
         private const val NOTIF_ID = 42
+        private const val BUSY_NOTIF_ID = 43
         private const val POLL_MS = 15_000L
-        // Short dwell for bubble scrape; inbound also covered by notification listener.
-        private const val DWELL_MS = 8_000L
-        private const val SCRAPE_INTERVAL_MS = 1_500L
+        /** Clock starts after the file is on disk. Upload + send-button confirm. */
+        private const val MEDIA_SEND_TIMEOUT_SEC = 300L
+        // After send, stay in the chat briefly. Delivery ticks are not written to Notion.
+        private const val DWELL_MS = 3_000L
+        private const val SCRAPE_INTERVAL_MS = 1_000L
 
         @Volatile
         private var instanceRunning: Boolean = false

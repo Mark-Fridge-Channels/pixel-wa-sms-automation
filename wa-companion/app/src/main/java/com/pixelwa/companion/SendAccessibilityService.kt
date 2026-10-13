@@ -169,6 +169,17 @@ class SendAccessibilityService : AccessibilityService() {
             }
         }
 
+        if (mediaMode && captionVisibleInChat(root, want)) {
+            Log.i(TAG, "caption already in chat; treat as sent")
+            markSendSuccess()
+            return
+        }
+        if (mediaMode && lastMediaSendClickAt > 0L && !inMediaComposer) {
+            Log.i(TAG, "media composer closed after send click")
+            markSendSuccess()
+            return
+        }
+
         if (mediaMode && inMediaComposer) {
             val now = System.currentTimeMillis()
             if (now - lastMediaSendClickAt < MEDIA_SEND_DEBOUNCE_MS) {
@@ -180,12 +191,33 @@ class SendAccessibilityService : AccessibilityService() {
 
         if (isMediaComposerOpen(root)) {
             lastMediaSendClickAt = System.currentTimeMillis()
+            if (captionVisibleInChat(root, want)) {
+                Log.i(TAG, "caption visible while media composer open; treat as sent")
+                markSendSuccess()
+                return
+            }
             Log.i(TAG, "send clicked but media composer still open; wait")
             return
         }
         Log.i(TAG, "send button clicked")
+        markSendSuccess()
+    }
+
+    private fun markSendSuccess() {
         armed.set(false)
         SendCoordinator.onSendAttempted(true, null)
+    }
+
+    /** Sent bubble text, not the caption field still open in the media composer. */
+    private fun captionVisibleInChat(root: AccessibilityNodeInfo, want: String?): Boolean {
+        val needle = want?.trim().orEmpty().take(40)
+        if (needle.length < 12) return false
+        val nodes = root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/message_text")
+            ?: return false
+        return nodes.any { node ->
+            val text = node.text?.toString()?.trim().orEmpty()
+            text == want?.trim() || text.contains(needle)
+        }
     }
 
     private fun isMediaComposerOpen(root: AccessibilityNodeInfo): Boolean {
@@ -278,6 +310,23 @@ class SendAccessibilityService : AccessibilityService() {
         return false
     }
 
+    /** Null unless the conversation composer is on screen. Never walks the chat list. */
+    private fun collectConversationBubbles(): Set<String>? {
+        val root = rootInActiveWindow ?: return null
+        if (root.packageName?.toString() != "com.whatsapp") return null
+        val inChat = !root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/entry").isNullOrEmpty()
+        if (!inChat) return null
+        val out = linkedSetOf<String>()
+        val byId = root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/message_text")
+        if (!byId.isNullOrEmpty()) {
+            for (n in byId) {
+                val t = n.text?.toString()?.trim().orEmpty()
+                if (t.isNotBlank() && !isChromeText(t)) out.add(t)
+            }
+        }
+        return out
+    }
+
     private fun collectMessageTexts(): Set<String> {
         val root = rootInActiveWindow ?: return emptySet()
         if (root.packageName?.toString() != "com.whatsapp") return emptySet()
@@ -332,6 +381,7 @@ class SendAccessibilityService : AccessibilityService() {
 
         fun armForSend() {
             probeArmed.set(false)
+            lastMediaSendClickAt = 0L
             armed.set(true)
             instance?.scheduleSendTicks()
         }
@@ -355,6 +405,20 @@ class SendAccessibilityService : AccessibilityService() {
             } catch (e: Exception) {
                 Log.w(TAG, "snapshot failed", e)
                 emptySet()
+            }
+        }
+
+        /**
+         * Bubbles in the open conversation only.
+         * Null when WhatsApp is on the chat list, Status, or another tab — those
+         * TextViews must not be reported as a reply.
+         */
+        fun snapshotConversationBubbles(): Set<String>? {
+            return try {
+                instance?.collectConversationBubbles()
+            } catch (e: Exception) {
+                Log.w(TAG, "conversation snapshot failed", e)
+                null
             }
         }
 
@@ -425,6 +489,71 @@ class SendAccessibilityService : AccessibilityService() {
             if (label == "连接" && clickDescOrText("com.wieifjyr.qs2", "连接")) return true
             return clickViewId("com.wieifjyr.qs2:id/fab", requireDescContains = "Start") ||
                 clickDescOrText("com.wieifjyr.qs2", "Start service")
+        }
+
+        /** Node name shown under 线路选择 on the 青山 home screen. */
+        fun qingshanCurrentServer(): String? {
+            return queryMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@queryMain null
+                if (root.packageName?.toString() != "com.wieifjyr.qs2") return@queryMain null
+                val item = root.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/item_select_server")
+                    ?.firstOrNull() ?: return@queryMain null
+                item.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/tv_value")
+                    ?.firstOrNull()?.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            }
+        }
+
+        fun openQingshanServerList(): Boolean = clickViewId("com.wieifjyr.qs2:id/item_select_server")
+
+        fun closeQingshanServerList(): Boolean = clickViewId("com.wieifjyr.qs2:id/btn_back")
+
+        /** Visible (name, status) rows in 线路列表; null when the list is not on screen. */
+        fun qingshanServerRows(): List<Pair<String, String>>? {
+            return queryMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@queryMain null
+                if (root.packageName?.toString() != "com.wieifjyr.qs2") return@queryMain null
+                if (root.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/recycler_view")
+                        .isNullOrEmpty()
+                ) {
+                    return@queryMain null
+                }
+                val names = root.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/tv_name")
+                    ?: return@queryMain emptyList()
+                names.mapNotNull { n ->
+                    val name = n.text?.toString()?.trim().orEmpty()
+                    if (name.isEmpty()) return@mapNotNull null
+                    val status = n.parent
+                        ?.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/tv_status")
+                        ?.firstOrNull()?.text?.toString()?.trim().orEmpty()
+                    name to status
+                }
+            }
+        }
+
+        fun clickQingshanServer(name: String): Boolean {
+            return onMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@onMain false
+                if (root.packageName?.toString() != "com.wieifjyr.qs2") return@onMain false
+                val nodes = root.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/tv_name")
+                    ?: return@onMain false
+                val hit = nodes.firstOrNull { it.text?.toString()?.trim() == name } ?: return@onMain false
+                clickNode(svc, hit)
+            }
+        }
+
+        fun scrollQingshanServers(forward: Boolean): Boolean {
+            return onMain(1200) { svc ->
+                val root = svc.rootInActiveWindow ?: return@onMain false
+                val list = root.findAccessibilityNodeInfosByViewId("com.wieifjyr.qs2:id/recycler_view")
+                    ?.firstOrNull() ?: return@onMain false
+                list.performAction(
+                    if (forward) {
+                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    } else {
+                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    },
+                )
+            }
         }
 
         fun dismissPermissionDialogs(): Boolean {
@@ -558,6 +687,15 @@ class SendAccessibilityService : AccessibilityService() {
             } catch (_: InterruptedException) {
                 false
             }
+        }
+
+        private fun <T> queryMain(timeoutMs: Long, block: (SendAccessibilityService) -> T?): T? {
+            var out: T? = null
+            onMain(timeoutMs) { svc ->
+                out = block(svc)
+                out != null
+            }
+            return out
         }
 
         /** Leave open chat so WhatsApp is not stuck on the conversation screen. */

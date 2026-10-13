@@ -4,4 +4,7 @@
     <string name="accessibility_description">Automates WhatsApp send taps and reconnects 青山 VPN when the tunnel is down.</string>
     <string name="notif_channel">wa_companion</string>
     <string name="notif_title">WA automation</string>
+    <string name="notif_busy_channel">任务执行提示</string>
+    <string name="notif_busy_title">正在发送 WhatsApp</string>
+    <string name="notif_busy_text">请不要操作手机，直到这条通知消失</string>
 </resources>

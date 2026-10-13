@@ -42,37 +42,91 @@ object MediaHelper {
     }
 
     fun downloadToCache(context: Context, url: String, mediaType: String): File? {
+        val ext = when (mediaType) {
+            "image" -> ".jpg"
+            "video" -> ".mp4"
+            "audio" -> ".m4a"
+            else -> ".bin"
+        }
+        val nameFromUrl = url.substringAfterLast('/').substringBefore('?')
+        val safe = nameFromUrl.ifBlank { "media$ext" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val expected = contentLength(url)
+        val cached = newestCache(context, safe)
+        if (cached != null && expected != null && cached.length() == expected) {
+            Log.i(TAG, "reuse cached media ${cached.name} size=${cached.length()}")
+            return cached
+        }
+        if (cached != null) {
+            Log.w(TAG, "drop incomplete cache ${cached.name} size=${cached.length()} expected=$expected")
+            cached.delete()
+        }
+        repeat(3) { attempt ->
+            val file = downloadOnce(context, url, safe, expected)
+            if (file != null) return file
+            if (attempt < 2) {
+                try {
+                    Thread.sleep(2_000L)
+                } catch (_: InterruptedException) {
+                    return null
+                }
+            }
+        }
+        return null
+    }
+
+    private fun contentLength(url: String): Long? {
         return try {
-            val ext = when (mediaType) {
-                "image" -> ".jpg"
-                "video" -> ".mp4"
-                "audio" -> ".m4a"
-                else -> ".bin"
+            val req = Request.Builder().url(url).head().build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val len = resp.body?.contentLength()?.takeIf { it > 0 }
+                    ?: resp.header("Content-Length")?.toLongOrNull()
+                len?.takeIf { it > 0 }
             }
-            val nameFromUrl = url.substringAfterLast('/').substringBefore('?')
-            val safe = nameFromUrl.ifBlank { "media$ext" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
-            // Reuse a completed prior download of the same basename (skip 100MB+ re-fetch).
-            val existing = context.cacheDir.listFiles()
-                ?.filter { it.isFile && it.name.endsWith("_$safe") && it.length() > 1024 }
-                ?.maxByOrNull { it.lastModified() }
-            if (existing != null) {
-                Log.i(TAG, "reuse cached media ${existing.name} size=${existing.length()}")
-                return existing
-            }
+        } catch (e: Exception) {
+            Log.w(TAG, "content-length failed", e)
+            null
+        }
+    }
+
+    private fun newestCache(context: Context, safe: String): File? {
+        return context.cacheDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith("_$safe") }
+            ?.maxByOrNull { it.lastModified() }
+    }
+
+    private fun downloadOnce(context: Context, url: String, safe: String, expected: Long?): File? {
+        val out = File(context.cacheDir, "out_${System.currentTimeMillis()}_$safe")
+        return try {
             val req = Request.Builder().url(url).get().build()
             http.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     Log.e(TAG, "download failed code=${resp.code}")
+                    out.delete()
                     return null
                 }
-                val out = File(context.cacheDir, "out_${System.currentTimeMillis()}_$safe")
-                resp.body?.byteStream()?.use { input ->
+                val body = resp.body ?: run {
+                    out.delete()
+                    return null
+                }
+                val declared = body.contentLength().takeIf { it > 0 } ?: expected
+                body.byteStream().use { input ->
                     out.outputStream().use { output -> input.copyTo(output) }
-                } ?: return null
+                }
+                if (declared != null && out.length() != declared) {
+                    Log.e(TAG, "download short size=${out.length()} expected=$declared")
+                    out.delete()
+                    return null
+                }
+                if (out.length() <= 0L) {
+                    out.delete()
+                    return null
+                }
                 out
             }
         } catch (e: Exception) {
             Log.e(TAG, "download error", e)
+            out.delete()
             null
         }
     }
