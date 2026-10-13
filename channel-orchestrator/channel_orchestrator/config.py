@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     )
     email_attachment_max_bytes: int = 10 * 1024 * 1024
     email_attachment_max_count: int = 5
+    # HTTPS hosts allowed to keep a remote /api/track/open/ pixel. Not downloaded.
+    # "*." matches one subdomain suffix, e.g. *.trycloudflare.com
+    email_tracking_img_hosts: str = "*.trycloudflare.com"
 
     data_dir: str = ""
 

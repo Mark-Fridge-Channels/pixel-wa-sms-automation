@@ -6,14 +6,19 @@ from channel_orchestrator.config import settings
 from channel_orchestrator.email_html import (
     contains_inline_base64,
     html_to_plain_text,
+    is_allowed_tracking_pixel_url,
     looks_like_html,
     sanitize_email_html,
 )
-from channel_orchestrator.gmail_client import GmailClient
+from channel_orchestrator.gmail_client import GmailClient, _allow_outbound_image
 from channel_orchestrator.s3_media import is_allowed_s3_media_url
 
 
 S3 = "https://bucket.s3.us-east-1.amazonaws.com/images/abc.jpg"
+PIXEL = (
+    "https://gdp-warned-sleeve-berkeley.trycloudflare.com"
+    "/api/track/open/eo1.abc.def"
+)
 
 
 def _allow(url: str) -> bool:
@@ -44,6 +49,29 @@ def test_sanitize_strips_xss_keeps_s3_img():
     assert "Alex" in html
     assert S3 in html
     assert "max-width:100%" in html
+
+
+def test_tracking_pixel_allowlist(monkeypatch):
+    monkeypatch.setattr(settings, "email_tracking_img_hosts", "*.trycloudflare.com")
+    html = sanitize_email_html(
+        f'<p>Hi</p><img src="{PIXEL}" alt="" width="1" height="1" '
+        'style="display:block;width:1px;height:1px" onerror="alert(1)" />'
+        '<img src="https://evil.example/api/track/open/eo1.x" />'
+        '<img src="https://gdp-warned-sleeve-berkeley.trycloudflare.com/logo.png" />'
+        '<img src="http://gdp-warned-sleeve-berkeley.trycloudflare.com/api/track/open/eo1.x" />',
+        _allow_outbound_image,
+    )
+    assert PIXEL in html
+    assert "evil.example" not in html
+    assert "logo.png" not in html
+    assert "http://" not in html
+    assert "onerror" not in html
+    assert 'width="1"' in html
+    assert "max-width:100%" not in html
+    assert is_allowed_tracking_pixel_url(PIXEL) is True
+    assert is_allowed_tracking_pixel_url(
+        "https://user:pass@gdp-warned-sleeve-berkeley.trycloudflare.com/api/track/open/x"
+    ) is False
 
 
 def test_html_to_plain_text():
@@ -127,3 +155,60 @@ def test_send_message_html_with_cid(monkeypatch):
     assert S3 not in decoded  # rewritten to cid
     assert "Hi" in decoded
     assert "alert" not in decoded
+
+
+def test_send_message_keeps_tracking_pixel_remote(monkeypatch):
+    monkeypatch.setattr(settings, "s3_bucket", "bucket")
+    monkeypatch.setattr(settings, "aws_region", "us-east-1")
+    monkeypatch.setattr(settings, "s3_public_base_url", "")
+    monkeypatch.setattr(settings, "email_tracking_img_hosts", "*.trycloudflare.com")
+    monkeypatch.setattr(settings, "email_attachment_max_bytes", 10 * 1024 * 1024)
+
+    client = GmailClient()
+    captured: dict = {}
+    fetched: list[str] = []
+
+    def fake_request(method, path, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return {"id": "m1", "threadId": "t1"}
+
+    class FakeResp:
+        status_code = 200
+        content = b"\x89PNG"
+        headers = {"content-type": "image/png"}
+
+    class FakeHttp:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            fetched.append(url)
+            assert url == S3
+            return FakeResp()
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    monkeypatch.setattr("channel_orchestrator.gmail_client.httpx.Client", FakeHttp)
+    client.send_message(
+        to="a@b.com",
+        subject="Hi",
+        body=f'<p>Hi Peter</p><img src="{PIXEL}" alt="" width="1" height="1" />',
+    )
+    import base64
+    from email import message_from_bytes
+
+    raw = captured["json"]["raw"] + "=="
+    msg = message_from_bytes(base64.urlsafe_b64decode(raw))
+    html = next(
+        part.get_payload(decode=True).decode("utf-8", errors="replace")
+        for part in msg.walk()
+        if part.get_content_type() == "text/html"
+    )
+    assert PIXEL in html
+    assert "cid:" not in html.lower()
+    assert fetched == []

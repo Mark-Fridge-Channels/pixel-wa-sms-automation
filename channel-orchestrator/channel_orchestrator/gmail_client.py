@@ -23,8 +23,14 @@ from .email_html import (
     mime_from_url_or_header,
     rewrite_img_src,
     sanitize_email_html,
+    is_allowed_tracking_pixel_url,
 )
 from .s3_media import is_allowed_s3_media_url
+
+
+def _allow_outbound_image(url: str) -> bool:
+    """S3 images are embedded. Tracking pixels stay remote so the open is recorded later."""
+    return is_allowed_s3_media_url(url) or is_allowed_tracking_pixel_url(url)
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +142,7 @@ class GmailClient:
         html_body: str | None = None
         related: list[dict[str, Any]] = []
         if looks_like_html(body or ""):
-            sanitized = sanitize_email_html(body or "", is_allowed_s3_media_url)
+            sanitized = sanitize_email_html(body or "", _allow_outbound_image)
             if sanitized:
                 html_body, related = self._cid_inline_images(sanitized)
                 msg.set_content(html_to_plain_text(html_body) or " ")

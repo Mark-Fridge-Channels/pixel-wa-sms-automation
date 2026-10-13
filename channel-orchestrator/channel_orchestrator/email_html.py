@@ -62,6 +62,59 @@ def contains_inline_base64(value: str | None) -> bool:
     return bool(BASE64_MEDIA_RE.search(value or ""))
 
 
+TRACKING_PIXEL_PATH_PREFIX = "/api/track/open/"
+
+
+def _tracking_host_entries() -> list[str]:
+    from .config import settings
+
+    raw = getattr(settings, "email_tracking_img_hosts", "") or ""
+    return [part.strip().lower().rstrip(".") for part in raw.split(",") if part.strip()]
+
+
+def _tracking_host_allowed(host: str) -> bool:
+    for entry in _tracking_host_entries():
+        if entry.startswith("*."):
+            suffix = entry[1:]
+            if host.endswith(suffix) and host != suffix[1:]:
+                return True
+        elif host == entry:
+            return True
+    return False
+
+
+def canonical_tracking_pixel_src(url: str) -> str | None:
+    """HTTPS open-tracking pixel on an allowlisted host, or None.
+
+    Rebuilt without userinfo or fragment so the src cannot smuggle another origin.
+    """
+    text = (url or "").strip()
+    if not text or any(ch in text for ch in "\r\n\t "):
+        return None
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return None
+    host = (parsed.hostname or "").lower().rstrip(".")
+    path = parsed.path or ""
+    if (
+        not host
+        or not _tracking_host_allowed(host)
+        or not path.startswith(TRACKING_PIXEL_PATH_PREFIX)
+        or "\\" in path
+        or ".." in path.split("/")
+    ):
+        return None
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"https://{host}{path}{query}"
+
+
+def is_allowed_tracking_pixel_url(url: str) -> bool:
+    return canonical_tracking_pixel_src(url) is not None
+
+
 def is_safe_href(url: str) -> bool:
     text = (url or "").strip()
     lower = text.lower()
@@ -128,6 +181,12 @@ class _Sanitizer(HTMLParser):
             src = mapping.get("src", "").strip()
             if not src or not self.allow_image_url(src):
                 return None
+            pixel = canonical_tracking_pixel_src(src)
+            if pixel:
+                return (
+                    f'<img src="{escape(pixel, quote=True)}" alt="" width="1" height="1" '
+                    'style="display:block;width:1px;height:1px;border:0" />'
+                )
             kept.append(f'src="{escape(src, quote=True)}"')
             alt = mapping.get("alt", "").strip()
             if alt:
