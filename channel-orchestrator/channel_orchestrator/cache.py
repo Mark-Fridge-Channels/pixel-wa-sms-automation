@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -9,6 +8,7 @@ from typing import Any
 from .channels import normalize_channel
 from .config import settings
 from .email_util import normalize_email, same_org_domain
+from .file_lock import locked_path
 from .phone import normalize_e164
 
 
@@ -22,6 +22,9 @@ class OutboundCache:
 
     WhatsApp marks state=ready at job enqueue (not only after Companion ACK) so
     inbound replies during send still match. Hard failures still mark failed.
+
+    Parallel Email workers, the Gmail poll and orch-serve each hold their own
+    instance; every read and write reloads the file under a file lock.
     """
 
     STATE_PENDING = "pending"
@@ -36,9 +39,9 @@ class OutboundCache:
             "SMS": "sms",
         }.get(self.channel, self.channel.lower())
         self.path = path or (settings.resolved_data_dir() / f"last_outbound_by_phone_{suffix}.json")
-        self._lock = threading.Lock()
         self._data: dict[str, Any] = {}
-        self.load()
+        with locked_path(self.path):
+            self.load()
 
     def _normalize_key(self, raw: str | None) -> str | None:
         if self.channel == "EMAIL":
@@ -93,7 +96,8 @@ class OutboundCache:
             entry["sent_at"] = sent_at.isoformat()
         if extra:
             entry.update(extra)
-        with self._lock:
+        with locked_path(self.path):
+            self.load()
             self._data[key] = entry
             self.save()
             return dict(entry)
@@ -163,7 +167,8 @@ class OutboundCache:
 
     def mark_failed(self, party_key: str) -> None:
         key = self._normalize_key(party_key) or party_key
-        with self._lock:
+        with locked_path(self.path):
+            self.load()
             prev = self._data.get(key)
             if not prev:
                 return
@@ -177,7 +182,8 @@ class OutboundCache:
         key = self._normalize_key(party_raw)
         if not key:
             return None
-        with self._lock:
+        with locked_path(self.path):
+            self.load()
             entry = self._data.get(key)
             return dict(entry) if entry else None
 
@@ -204,7 +210,8 @@ class OutboundCache:
         if not frm:
             return []
         out: list[dict[str, Any]] = []
-        with self._lock:
+        with locked_path(self.path):
+            self.load()
             for entry in self._data.values():
                 if entry.get("state") != self.STATE_READY:
                     continue
@@ -217,7 +224,8 @@ class OutboundCache:
     def get_ready_by_gmail_thread(self, gmail_thread_id: str | None) -> dict[str, Any] | None:
         if not gmail_thread_id:
             return None
-        with self._lock:
+        with locked_path(self.path):
+            self.load()
             for entry in self._data.values():
                 if entry.get("state") != self.STATE_READY:
                     continue

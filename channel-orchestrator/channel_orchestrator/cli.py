@@ -207,6 +207,18 @@ def main() -> None:
         "sync-client-domains",
         help="Sync Follow-up Client → Client.Domain cache (full table)",
     )
+    p_sup = sub.add_parser(
+        "email-suppression",
+        help="Hard-bounced addresses that Email sends are blocked for",
+    )
+    p_sup.add_argument("action", choices=["list", "check", "add", "remove"])
+    p_sup.add_argument("email", nargs="?", default="")
+    p_sup.add_argument("--reason", default="手动加入：硬退信")
+    p_sup.add_argument(
+        "--task-id",
+        default="",
+        help="add: also write the bounce back (Task Failed, Conversation 发送失败) so the Task can be re-pended",
+    )
 
     args = parser.parse_args()
     client = SmsGatewayClient()
@@ -282,6 +294,48 @@ def main() -> None:
 
     if args.cmd == "register-email-sent":
         print(json.dumps(_register_email_sent(args), ensure_ascii=False, indent=2, default=str))
+        return
+
+    if args.cmd == "email-suppression":
+        from .email_suppression import EmailSuppressionList
+
+        store = EmailSuppressionList()
+        if args.action == "list":
+            out: object = store.list()
+        else:
+            if not args.email.strip():
+                raise SystemExit(f"email-suppression {args.action} 需要邮箱参数")
+            if args.action == "check":
+                out = {"email": args.email, "entry": store.get(args.email)}
+            elif args.action == "add":
+                out = store.add(
+                    args.email, reason=args.reason, task_id=args.task_id or None, source="cli"
+                )
+                if out is None:
+                    raise SystemExit(f"邮箱无效: {args.email!r}")
+                if args.task_id:
+                    from .notion_client import NotionClient
+                    from .outbound import fail_email_task_from_bounce
+
+                    notion = NotionClient()
+                    resolved = notion.resolve_task_for_send(args.task_id)
+                    out = {
+                        "suppression": out,
+                        "writeback": fail_email_task_from_bounce(
+                            cache_entry={
+                                "task_page_id": args.task_id,
+                                "conversation_page_id": resolved.conversation_id,
+                                "email": out["email"],
+                                "thread_id": resolved.thread_id,
+                            },
+                            reason=args.reason,
+                            kind="hard_bounce",
+                            notion=notion,
+                        ),
+                    }
+            else:
+                out = {"email": args.email, "removed": store.remove(args.email)}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
     if args.cmd == "sync-client-domains":

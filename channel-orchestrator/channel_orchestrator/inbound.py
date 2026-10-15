@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +9,7 @@ from .cache import OutboundCache
 from .channels import channel_display_name, normalize_channel
 from .config import settings
 from .email_classify import classify_inbound_email
+from .email_suppression import EmailSuppressionList
 from .email_util import (
     classify_email_reply_relation,
     normalize_email,
@@ -68,9 +70,60 @@ def _match_bounce_recipient(cache: OutboundCache, failed_recipients: Any) -> dic
     hits: list[dict[str, Any]] = []
     for raw in failed_recipients:
         entry = cache.get(str(raw))
-        if entry and entry.get("state") == OutboundCache.STATE_READY and entry.get("thread_id"):
+        if (
+            entry
+            and entry.get("state") in {OutboundCache.STATE_READY, OutboundCache.STATE_PENDING}
+            and entry.get("thread_id")
+        ):
             hits.append(entry)
     return _unique_task(hits)
+
+
+_NOTES_TO_RE = re.compile(r"^To:\s*(\S+@\S+)", re.M)
+
+
+def _match_bounce_via_notion(
+    notion: Any,
+    gmail_thread_id: str | None,
+    failed_named: set[str],
+) -> dict[str, Any] | None:
+    """Cache lost the row: find the sent Task through its Conversation's gmailThreadId."""
+    if not gmail_thread_id or not failed_named:
+        return None
+    try:
+        hit = notion.find_outbound_email_by_gmail_thread(gmail_thread_id)
+        if not isinstance(hit, dict) or not hit.get("task_id"):
+            return None
+        task_id = str(hit["task_id"])
+        status = notion.get_task_status(task_id)
+        if status not in {"Completed", "In Progress"}:
+            log.info("bounce notion match skipped task=%s status=%s", task_id, status)
+            return None
+        from .notion_props import props, rich_text_plain
+
+        resolved = notion.resolve_task_for_send(task_id)
+        notes = rich_text_plain(props(notion.get_page(task_id)).get("Notes")) or ""
+        candidates = {normalize_email(resolved.email)}
+        candidates.update(normalize_email(m) for m in _NOTES_TO_RE.findall(notes))
+        recipient = next((e for e in candidates if e and e in failed_named), None)
+        if not recipient:
+            log.info(
+                "bounce notion match skipped task=%s: recipient %s not in %s",
+                task_id,
+                sorted(e for e in candidates if e),
+                sorted(failed_named),
+            )
+            return None
+        return {
+            "task_page_id": task_id,
+            "conversation_page_id": hit.get("conversation_id"),
+            "email": recipient,
+            "thread_id": resolved.thread_id,
+            "gmail_thread_id": gmail_thread_id,
+        }
+    except Exception:  # noqa: BLE001
+        log.exception("bounce notion lookup failed gmail_thread=%s", gmail_thread_id)
+        return None
 
 
 def _match_same_org_subject(
@@ -142,6 +195,7 @@ def handle_inbound_message(
     cache: OutboundCache | None = None,
     reply_webhook: ReplyWebhookClient | None = None,
     write_notion: bool = True,
+    suppression: EmailSuppressionList | None = None,
 ) -> dict[str, Any]:
     ch = normalize_channel(channel)
     notion = notion or NotionClient()
@@ -184,7 +238,28 @@ def handle_inbound_message(
         )
         kind = cls.get("kind") or "human"
         email_kind = kind
-        if kind in {"hard_bounce", "soft_bounce"}:
+        if kind == "soft_bounce":
+            # Temporary failure (delay, mailbox full, …): Gmail keeps retrying; Task and cache stay as-is.
+            failed = list(normalized.get("failed_recipients") or [])
+            log.info(
+                "email soft bounce ignored gmail_thread=%s failed_recipients=%s reason=%s",
+                gmail_thread_id,
+                failed,
+                cls.get("reason"),
+            )
+            return done(
+                {
+                    "ok": True,
+                    "matched": False,
+                    "skipped": True,
+                    "bounce": True,
+                    "kind": kind,
+                    "webhook": {"ok": True, "skipped": True, "reason": "soft_bounce_ignored"},
+                    "event": {"kind": kind, "reason": cls.get("reason"), "failed_recipients": failed},
+                },
+                preview=subject or body,
+            )
+        if kind == "hard_bounce":
             failed_named = {
                 e for e in (normalize_email(str(x)) for x in normalized.get("failed_recipients") or []) if e
             }
@@ -197,6 +272,20 @@ def handle_inbound_message(
             if not matched:
                 matched = _match_bounce_recipient(cache, normalized.get("failed_recipients"))
                 bounce_matched_by = "failed_recipient" if matched else ""
+            if not matched:
+                matched = _match_bounce_via_notion(notion, gmail_thread_id, failed_named)
+                bounce_matched_by = "notion_thread" if matched else ""
+            if failed_named:
+                store = suppression or EmailSuppressionList()
+                for addr in sorted(failed_named):
+                    store.add(
+                        addr,
+                        reason=cls.get("reason") or kind,
+                        kind=kind,
+                        task_id=(matched or {}).get("task_page_id"),
+                        gmail_thread_ids=[gmail_thread_id, (matched or {}).get("gmail_thread_id")],
+                    )
+                log.warning("email hard bounce suppressed addresses=%s", sorted(failed_named))
             if matched:
                 bounce_result = fail_email_task_from_bounce(
                     cache_entry=matched,

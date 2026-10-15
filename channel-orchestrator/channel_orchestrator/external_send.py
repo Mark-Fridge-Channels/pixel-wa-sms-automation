@@ -101,6 +101,12 @@ def register_external_email_sent(
             log.warning("gmail lookup failed for external send id=%s", gmail_message_id, exc_info=True)
     sent = sent or datetime.now(timezone.utc)
 
+    from .email_suppression import EmailSuppressionList, blocked_notes
+
+    bounced = EmailSuppressionList().get(to)
+    if bounced:
+        log.warning("external send to hard-bounced address email=%s task=%s", to, task_id)
+
     cache = cache or OutboundCache(channel="EMAIL")
     prev = cache.get(to)
     if prev and prev.get("task_page_id") != task_id:
@@ -159,4 +165,6 @@ def register_external_email_sent(
         "gmail_thread_id": gmail_thread_id,
         "subject": subject,
         "sent_at": entry.get("sent_at"),
+        "suppressed": bool(bounced),
+        "warning": blocked_notes(to, bounced) if bounced else None,
     }

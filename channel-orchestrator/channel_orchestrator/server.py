@@ -596,6 +596,34 @@ async def email_external_sent(
     return JSONResponse(result)
 
 
+@app.get("/api/email/suppression")
+async def email_suppression(
+    email: str = "",
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Check before sending outside the orchestrator: ?email=x → {suppressed, entry}. No email → full list."""
+    _check_external_send_token(authorization)
+    from .email_suppression import EmailSuppressionList, blocked_notes
+    from .email_util import normalize_email
+
+    store = EmailSuppressionList()
+    if not email.strip():
+        return JSONResponse({"ok": True, "items": store.list()})
+    to = normalize_email(email)
+    if not to:
+        raise HTTPException(status_code=400, detail=f"email 无效: {email!r}")
+    entry = store.get(to)
+    return JSONResponse(
+        {
+            "ok": True,
+            "email": to,
+            "suppressed": bool(entry),
+            "entry": entry,
+            "message": blocked_notes(to, entry) if entry else None,
+        }
+    )
+
+
 @app.get("/api/monitor/summary")
 def monitor_summary() -> dict[str, Any]:
     return {

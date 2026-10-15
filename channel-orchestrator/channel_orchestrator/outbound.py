@@ -7,6 +7,8 @@ from typing import Any
 from .cache import OutboundCache
 from .channels import normalize_channel
 from .config import settings
+from .email_suppression import EmailSuppressionList, blocked_notes
+from .email_util import normalize_email
 from .gateway import SmsGatewayClient
 from .heartbeat import touch_heartbeat
 from .notion_client import NotionClient, ResolvedTask
@@ -349,7 +351,7 @@ def fail_email_task_from_bounce(
     notion: NotionClient | None = None,
     cache: OutboundCache | None = None,
 ) -> dict[str, Any]:
-    """After outbound Completed, hard/soft bounce → Task Failed with distinct Notes."""
+    """After outbound Completed, hard bounce → Task Failed with distinct Notes."""
     notion = notion or NotionClient()
     cache = cache or OutboundCache(channel="EMAIL")
     now = datetime.now(timezone.utc)
@@ -393,12 +395,14 @@ def execute_resolved_email(
     gmail: Any | None = None,
     cache: OutboundCache | None = None,
     dry_run: bool = False,
+    suppression: EmailSuppressionList | None = None,
 ) -> dict[str, Any]:
     from .gmail_client import GmailClient
 
     notion = notion or NotionClient()
     gmail = gmail or GmailClient()
     cache = cache or OutboundCache(channel="EMAIL")
+    suppression = suppression or EmailSuppressionList()
     now = datetime.now(timezone.utc)
     our = settings.gmail_user or None
 
@@ -429,10 +433,38 @@ def execute_resolved_email(
     assert resolved.email and resolved.conversation_id and resolved.thread_id
     # content may be empty when attachments present
 
+    bounced = suppression.get(resolved.email)
+    if bounced:
+        notes = blocked_notes(resolved.email, bounced)
+        if not dry_run:
+            notion.update_task_status(resolved.task_id, "Failed", ended_at=now, notes=notes)
+            record_attempt(resolved.task_id, channel="EMAIL", outcome="hard_failed", detail=notes)
+        log.warning("email send blocked: %s hard-bounced before task=%s", resolved.email, resolved.task_id)
+        return {
+            "ok": False,
+            "status": "failed",
+            "reason": notes,
+            "task_id": resolved.task_id,
+            "email": resolved.email,
+            "suppressed": True,
+            "channel": "EMAIL",
+        }
+
+    cc = list(resolved.cc or [])
+    cc_warnings: list[str] = []
+    bad_cc = [c for c in cc if suppression.get(c)]
+    if bad_cc:
+        cc = [c for c in cc if c not in bad_cc]
+        cc_warnings.append("已跳过之前硬退信的抄送：" + "、".join(bad_cc) + "，请重新找邮箱")
+
     gmail_thread_id = (
         (resolved.extended_parameters or {}).get("gmailThreadId")
         or (resolved.extended_parameters or {}).get("gmail_thread_id")
     )
+    thread_bounce = suppression.entry_for_thread(gmail_thread_id)
+    if thread_bounce and thread_bounce.get("email") != normalize_email(resolved.email):
+        # The corrected recipient never got the bounced thread; replying in it would quote a DSN.
+        gmail_thread_id = None
     subject = resolved.subject or resolved.title or "(no subject)"
 
     if dry_run:
@@ -445,7 +477,8 @@ def execute_resolved_email(
             "gmail_thread_id": gmail_thread_id,
             "subject": subject,
             "content": resolved.content,
-            "cc": list(resolved.cc or []),
+            "cc": cc,
+            "cc_warnings": cc_warnings,
             "attachments": len(resolved.attachments or []),
             "channel": "EMAIL",
         }
@@ -454,7 +487,7 @@ def execute_resolved_email(
 
     pipeline = EmailAttachmentPipeline()
     file_parts, dl_notices = pipeline.download_for_send(list(resolved.attachments or []))
-    warnings = list(resolved.attachment_warnings or []) + dl_notices
+    warnings = list(resolved.attachment_warnings or []) + dl_notices + cc_warnings
     if not (resolved.content or "").strip() and not file_parts:
         msg = "Email 无正文且无可用附件"
         if warnings:
@@ -480,7 +513,7 @@ def execute_resolved_email(
             subject=subject,
             body=resolved.content or "",
             gmail_thread_id=gmail_thread_id,
-            cc=list(resolved.cc or []) or None,
+            cc=cc or None,
             attachments=file_parts or None,
         )
     except Exception as e:  # noqa: BLE001
@@ -544,7 +577,7 @@ def execute_resolved_email(
         "thread_id": resolved.thread_id,
         "gmail_thread_id": gtid,
         "gmail_message_id": gmid,
-        "cc": list(resolved.cc or []),
+        "cc": cc,
         "attachments_sent": len(file_parts),
         "attachment_warnings": warnings,
         "channel": "EMAIL",

@@ -48,6 +48,16 @@ _SOFT_BODY = (
     r"out\s*of\s*storage",
 )
 
+# Delay DSNs share the "Delivery Status Notification" subject but the server is still retrying.
+_DELAY = (
+    r"delivery\s*status\s*notification\s*\(delay\)",
+    r"delivery\s*(has\s*been\s*)?delayed",
+    r"message\s*(is\s*)?delayed",
+    r"will\s*(keep\s*)?(retry|trying)",
+    r"not\s*(been\s*)?delivered\s*yet",
+    r"delivery\s*incomplete",
+)
+
 _AUTO_SUBJECT = (
     r"out\s*of\s*office",
     r"automatic\s*reply",
@@ -77,6 +87,10 @@ def classify_inbound_email(
     blob = f"{subj_l}\n{body_l}\n{from_l}"
 
     auto = (headers.get("auto-submitted") or "").strip().lower()
+    is_daemon = "mailer-daemon@" in from_l or "postmaster@" in from_l
+    if ((auto and auto != "no") or is_daemon) and _match_any(blob, _DELAY):
+        return _result("soft_bounce", "Email软退信：投递延迟，服务器仍在重试")
+
     if auto and auto != "no":
         # Delivery Status Notification often has auto-submitted
         if _match_any(blob, _HARD_SUBJECT) or _match_any(blob, _HARD_BODY):
@@ -90,7 +104,7 @@ def classify_inbound_email(
             return _result("auto_reply", "Email自动回复（Auto-Submitted: auto-replied）")
         return _result("system_other", "Email系统回执（非人工），已忽略")
 
-    if "mailer-daemon@" in from_l or "postmaster@" in from_l:
+    if is_daemon:
         if _match_any(blob, _SOFT_BODY) and not _match_any(blob, _HARD_BODY):
             return _result("soft_bounce", "Email软退信：暂时无法投递（Mailer-Daemon）")
         return _result("hard_bounce", "Email硬退信：Mailer-Daemon 退信")

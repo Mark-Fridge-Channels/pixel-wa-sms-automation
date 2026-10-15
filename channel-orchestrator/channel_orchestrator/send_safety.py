@@ -149,7 +149,11 @@ def recent_uncertain_attempt(
 
 
 def conversation_already_sent(notion: Any, conversation_id: str | None) -> bool:
-    """True when outbound Conversation already has Interaction At (schema dropped Message Status)."""
+    """True when outbound Conversation already has Interaction At (schema dropped Message Status).
+
+    A Conversation marked 发送失败 (hard failure or bounce) is not sent: re-pending the Task
+    after fixing the recipient must send again.
+    """
     if not conversation_id:
         return False
     try:
@@ -157,9 +161,11 @@ def conversation_already_sent(notion: Any, conversation_id: str | None) -> bool:
         from .notion_props import date_start, props, rich_text_plain
 
         p = props(page)
+        notes = rich_text_plain(p.get("Notes")) or ""
+        if notes.startswith("发送失败"):
+            return False
         if date_start(p.get("Interaction At")):
             return True
-        notes = rich_text_plain(p.get("Notes")) or ""
         return notes.startswith("已发送")
     except Exception:  # noqa: BLE001
         log.exception("failed to read conversation send markers")
@@ -189,7 +195,10 @@ def retry_blocked_reason(
     """If non-None, execute_plan_item should skip sending."""
     if force:
         return None
-    notes = task_notes(notion, task_id)
+    from .notion_props import latest_note_entry
+
+    # Notes accumulate status entries; only the newest one describes the last attempt.
+    notes = latest_note_entry(task_notes(notion, task_id))
     if _FORCE_OK_RE.search(notes or ""):
         return None
     if is_uncertain_notes(notes):

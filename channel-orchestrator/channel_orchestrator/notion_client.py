@@ -13,12 +13,14 @@ from .config import settings
 from .email_attachments import EmailAttachmentPipeline, parse_attachments_json, parse_cc_list
 from .email_util import email_value_from_prop, normalize_email
 from .notion_props import (
+    append_note_entry,
     date_start,
     is_scheduled_due,
     parse_notion_datetime,
     phone_value,
     props,
     relation_ids,
+    rich_text_chunks,
     rich_text_plain,
     select_name,
 )
@@ -173,7 +175,11 @@ class NotionClient:
                 "date": {"start": ended_at.astimezone(timezone.utc).isoformat()}
             }
         if notes is not None:
-            properties["Notes"] = {"rich_text": [{"text": {"content": notes[:1900]}}]}
+            existing = rich_text_plain(props(self.get_page(task_id)).get("Notes"))
+            combined = append_note_entry(
+                existing, status, notes, datetime.now(timezone.utc), settings.timezone
+            )
+            properties["Notes"] = {"rich_text": rich_text_chunks(combined)}
         return self._request("PATCH", f"/pages/{task_id}", json={"properties": properties})
 
     def update_conversation_outbound(
@@ -224,6 +230,39 @@ class NotionClient:
             "Extended Parameters": {"rich_text": [{"text": {"content": text[:1900]}}]}
         }
         return self._request("PATCH", f"/pages/{conversation_id}", json={"properties": properties})
+
+    def find_outbound_email_by_gmail_thread(self, gmail_thread_id: str | None) -> dict[str, Any] | None:
+        """Outbound Email Conversation whose Extended Parameters carry this gmailThreadId.
+
+        Fallback when the local cache lost the row. Returns {conversation_id, task_id}.
+        """
+        if not gmail_thread_id or not self.token:
+            return None
+        pages = self.query_data_source(
+            self.conversation_ds,
+            {
+                "filter": {
+                    "and": [
+                        {"property": "Channel", "select": {"equals": channel_display_name("EMAIL")}},
+                        {"property": "Extended Parameters", "rich_text": {"contains": gmail_thread_id}},
+                    ]
+                },
+                "page_size": 10,
+            },
+        )
+        hits: list[dict[str, Any]] = []
+        for page in pages:
+            p = props(page)
+            if select_name(p.get("Direction")) == "Inbound":
+                continue
+            ext = parse_extended_parameters(p.get("Extended Parameters"))
+            if gmail_thread_id not in {ext.get("gmailThreadId"), ext.get("gmail_thread_id")}:
+                continue
+            task_ids = relation_ids(p.get("Follow-up Task"))
+            if task_ids:
+                hits.append({"conversation_id": page.get("id"), "task_id": task_ids[0]})
+        by_task = {h["task_id"]: h for h in hits}
+        return next(iter(by_task.values())) if len(by_task) == 1 else None
 
     def create_inbound_conversation(
         self,
