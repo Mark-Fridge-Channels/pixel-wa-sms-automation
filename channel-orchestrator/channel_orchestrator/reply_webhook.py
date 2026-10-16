@@ -53,6 +53,11 @@ class ReplyWebhookClient:
             body["attachments"] = attachments
         if payload.get("subject") is not None or payload.get("channel") == "Email":
             body["subject"] = payload.get("subject") or ""
+        if payload.get("channel") == "Email":
+            if payload.get("recipient"):
+                body["recipient"] = payload.get("recipient")
+            if payload.get("cc"):
+                body["cc"] = payload.get("cc")
         if not body["taskId"] or not body["threadId"]:
             return {
                 "ok": False,
@@ -188,6 +193,8 @@ class ReplyWebhookClient:
         sender: str | None,
         occurred_at: datetime | str | None,
         subject: str | None = None,
+        recipient: str | None = None,
+        cc: str | None = None,
         gmail_thread_id: str | None = None,
         gmail_message_id: str | None = None,
         extra_extended: dict[str, Any] | None = None,
@@ -211,6 +218,10 @@ class ReplyWebhookClient:
             "occurredAt": _iso(occurred_at),
             "extendedParameters": ext,
         }
+        if recipient:
+            out["recipient"] = recipient
+        if cc:
+            out["cc"] = cc
         if attachments:
             out["attachments"] = attachments
         return out

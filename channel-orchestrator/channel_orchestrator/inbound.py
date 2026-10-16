@@ -12,6 +12,7 @@ from .email_classify import classify_inbound_email
 from .email_suppression import EmailSuppressionList
 from .email_util import (
     classify_email_reply_relation,
+    extract_emails_from_header_value,
     normalize_email,
     parse_public_domains,
     subject_matches_outbound,
@@ -24,6 +25,63 @@ from .phone import normalize_e164
 from .reply_webhook import ReplyWebhookClient
 
 log = logging.getLogger(__name__)
+
+
+def _join_header_emails(*sources: Any) -> str | None:
+    """Normalize To/Cc header sources into a comma-separated address list."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        values: list[str]
+        if isinstance(source, list):
+            values = [str(x) for x in source]
+        elif source:
+            values = extract_emails_from_header_value(str(source))
+        else:
+            values = []
+        for raw in values:
+            email = normalize_email(raw)
+            if email and email not in seen:
+                seen.add(email)
+                out.append(email)
+    return ",".join(out) if out else None
+
+
+def _match_reply_via_notion(
+    notion: Any,
+    gmail_thread_id: str | None,
+) -> dict[str, Any] | None:
+    """Cache miss: recover the outbound Task/thread from Conversation.gmailThreadId."""
+    if not gmail_thread_id:
+        return None
+    try:
+        hit = notion.find_outbound_email_by_gmail_thread(gmail_thread_id)
+        if not isinstance(hit, dict) or not hit.get("task_id") or not hit.get("thread_id"):
+            return None
+        task_id = str(hit["task_id"])
+        status = notion.get_task_status(task_id)
+        if status not in {"Completed", "In Progress", "Failed"}:
+            log.info("reply notion match skipped task=%s status=%s", task_id, status)
+            return None
+        outbound_email = None
+        contact_id = hit.get("contact_page_id")
+        try:
+            resolved = notion.resolve_task_for_send(task_id)
+            outbound_email = resolved.email
+            contact_id = contact_id or resolved.contact_id
+        except Exception:  # noqa: BLE001
+            log.exception("reply notion match: resolve_task_for_send failed task=%s", task_id)
+        return {
+            "task_page_id": task_id,
+            "thread_id": hit.get("thread_id"),
+            "conversation_page_id": hit.get("conversation_id"),
+            "contact_page_id": contact_id,
+            "email": outbound_email,
+            "gmail_thread_id": gmail_thread_id,
+        }
+    except Exception:  # noqa: BLE001
+        log.exception("reply notion lookup failed gmail_thread=%s", gmail_thread_id)
+        return None
 
 
 def _enrich_email_attachments(normalized: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], str]:
@@ -372,6 +430,9 @@ def handle_inbound_message(
         if not matched and party_key:
             matched = _match_same_org_subject(cache, party_key, subject, public_domains=pubs)
             matched_by = "domain_subject" if matched else ""
+        if not matched:
+            matched = _match_reply_via_notion(notion, gmail_thread_id)
+            matched_by = "notion_gmail_thread" if matched else ""
         if matched:
             outbound_to = matched.get("email")
             reply_meta = classify_email_reply_relation(
@@ -452,6 +513,10 @@ def handle_inbound_message(
                 media_filename=str(media_filename) if media_filename else None,
             )
         elif ch == "EMAIL":
+            email_recipient = _join_header_emails(
+                normalized.get("to_emails"), normalized.get("to_raw")
+            )
+            email_cc = _join_header_emails(normalized.get("cc_emails"), normalized.get("cc_raw"))
             payload = reply_webhook.build_email_payload(
                 task_id=task_id,
                 thread_id=thread_id,
@@ -459,12 +524,14 @@ def handle_inbound_message(
                 sender=party_key,
                 occurred_at=interaction_at,
                 subject=subject or None,
+                recipient=email_recipient,
+                cc=email_cc,
                 gmail_thread_id=str(gmail_thread_id) if gmail_thread_id else None,
                 gmail_message_id=str(provider_message_id) if provider_message_id else None,
                 extra_extended={
                     "outboundTo": reply_meta.get("outboundTo"),
                     "replyFrom": reply_meta.get("replyFrom") or party_key,
-                    "replyMatch": reply_meta.get("replyMatch"),
+                    "replyMatch": reply_meta.get("replyMatch") or matched_by,
                     "proxyReply": reply_meta.get("proxyReply"),
                     "sameOrgDomain": reply_meta.get("sameOrgDomain"),
                     "unexpectedSender": reply_meta.get("unexpectedSender"),
@@ -487,7 +554,7 @@ def handle_inbound_message(
         # No Task ready → cold inbound (POST /api/inbound); ignore Gmail thread cache
         from .email_cold_inbound import handle_email_cold_inbound
 
-        cold = handle_email_cold_inbound(normalized)
+        cold = handle_email_cold_inbound(normalized, notion=notion)
         return done(
             {
                 "ok": cold.get("ok", True),

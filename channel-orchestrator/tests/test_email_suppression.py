@@ -273,6 +273,44 @@ def test_delay_dsn_is_soft_bounce():
     assert cls["kind"] == "soft_bounce"
 
 
+def test_reply_notion_thread_fallback_passes_to_and_cc(tmp_path, monkeypatch):
+    """Cache miss: recover Task via Conversation.gmailThreadId and send header To/Cc."""
+    cache = _setup(tmp_path, monkeypatch)
+    notion = MagicMock()
+    notion.find_outbound_email_by_gmail_thread.return_value = {
+        "conversation_id": "conv-out",
+        "task_id": "task-shaw",
+        "thread_id": "THR-shaw-Email",
+        "contact_page_id": "c1",
+    }
+    notion.get_task_status.return_value = "Completed"
+    notion.resolve_task_for_send.return_value = _resolved("jack@puregreen.com")
+    wh = MagicMock()
+    wh.build_email_payload.side_effect = lambda **kw: kw
+    wh.post_reply.return_value = {"ok": True}
+    result = handle_inbound_email(
+        {
+            "sender": "carol@puregreen.com",
+            "subject": "Re: Jack — Carol brought this back from NACS",
+            "body": "Thanks for the follow-up Ella!",
+            "gmail_thread_id": "1a13a85b260d09fa",
+            "to_emails": ["jack@puregreen.com"],
+            "cc_emails": ["ella@fridgechannels.com"],
+        },
+        notion=notion,
+        cache=cache,
+        reply_webhook=wh,
+        write_notion=False,
+    )
+    assert result["matched"] is True
+    kwargs = wh.build_email_payload.call_args.kwargs
+    assert kwargs["task_id"] == "task-shaw"
+    assert kwargs["sender"] == "carol@puregreen.com"
+    assert kwargs["recipient"] == "jack@puregreen.com"
+    assert kwargs["cc"] == "ella@fridgechannels.com"
+    wh.post_reply.assert_called_once()
+
+
 def test_cache_parallel_instances_do_not_lose_rows(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     path = tmp_path / "email_cache.json"

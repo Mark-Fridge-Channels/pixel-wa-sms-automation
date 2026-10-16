@@ -171,7 +171,8 @@ def test_inbound_portal_sender_only(monkeypatch):
     assert "FollowUpClientId" not in captured["json"]
 
 
-def test_cold_inbound_multi_client(tmp_path, monkeypatch):
+def test_cold_inbound_multi_client_omits_brand_hint(tmp_path, monkeypatch):
+    """Ambiguous domain → one POST with From only; Portal resolves Contact globally."""
     from channel_orchestrator.email_cold_inbound import handle_email_cold_inbound
 
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
@@ -203,17 +204,15 @@ def test_cold_inbound_multi_client(tmp_path, monkeypatch):
         domain_cache=cache,
     )
     assert result["cold"] is True
-    assert portal.post_inbound.call_count == 2
-    ids = {
-        c.kwargs.get("followup_client_id")
-        for c in portal.post_inbound.call_args_list
+    assert portal.post_inbound.call_count == 1
+    kwargs = portal.post_inbound.call_args.kwargs
+    assert kwargs["sender"] == "buyer@acme.com"
+    assert kwargs["followup_client_id"] is None
+    assert kwargs["recipient"] == "ella@fridgechannels.com"
+    assert kwargs["extended_parameters"] == {
+        "gmailThreadId": "gt-cold",
+        "gmailMessageId": "gm-cold",
     }
-    assert ids == {"fc-a", "fc-b"}
-    for c in portal.post_inbound.call_args_list:
-        assert c.kwargs["extended_parameters"] == {
-            "gmailThreadId": "gt-cold",
-            "gmailMessageId": "gm-cold",
-        }
 
 
 def test_cold_inbound_writes_extended_on_conversation(tmp_path, monkeypatch):
@@ -274,7 +273,7 @@ def test_cold_inbound_public_domain_sender_only(tmp_path, monkeypatch):
     assert result["calls"][0]["FollowUpClientId"] is None
 
 
-def test_cold_inbound_internal_only_skips(tmp_path, monkeypatch):
+def test_cold_inbound_internal_from_skips(tmp_path, monkeypatch):
     from channel_orchestrator.email_cold_inbound import handle_email_cold_inbound
 
     monkeypatch.setattr(settings, "email_internal_domains", "fridgechannels.com")
@@ -291,7 +290,36 @@ def test_cold_inbound_internal_only_skips(tmp_path, monkeypatch):
         domain_cache=FollowUpClientDomainCache(path=tmp_path / "d.json"),
     )
     assert result.get("skipped") is True
+    assert result.get("reason") == "internal_from"
     portal.post_inbound.assert_not_called()
+
+
+def test_cold_inbound_keeps_to_and_cc_headers(tmp_path, monkeypatch):
+    from channel_orchestrator.email_cold_inbound import handle_email_cold_inbound
+
+    monkeypatch.setattr(settings, "email_internal_domains", "fridgechannels.com")
+    monkeypatch.setattr(settings, "notion_token", "")
+    cache = FollowUpClientDomainCache(path=tmp_path / "d.json")
+    cache._data = {"by_domain": {"puregreen.com": ["fc-pg"]}, "pages": {}, "updated_at": None}
+    portal = MagicMock()
+    portal.post_inbound.return_value = {"ok": True}
+    handle_email_cold_inbound(
+        {
+            "sender": "carol@puregreen.com",
+            "subject": "Re: Jack — Carol brought this back from NACS",
+            "body": "Thanks for the follow-up Ella!",
+            "to_emails": ["jack@puregreen.com"],
+            "cc_emails": ["ella@fridgechannels.com"],
+        },
+        portal=portal,
+        domain_cache=cache,
+    )
+    assert portal.post_inbound.call_count == 1
+    kwargs = portal.post_inbound.call_args.kwargs
+    assert kwargs["sender"] == "carol@puregreen.com"
+    assert kwargs["recipient"] == "jack@puregreen.com"
+    assert kwargs["cc"] == "ella@fridgechannels.com"
+    assert kwargs["followup_client_id"] == "fc-pg"
 
 
 def test_email_task_match_skips_cold(tmp_path, monkeypatch):

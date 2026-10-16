@@ -35,6 +35,8 @@ class InboundPortalClient:
         content: str,
         sender: str,
         subject: str | None = None,
+        recipient: str | None = None,
+        cc: str | None = None,
         followup_client_id: str | None = None,
         extended_parameters: dict[str, Any] | None = None,
         attachments: list[dict[str, Any]] | None = None,
@@ -57,6 +59,10 @@ class InboundPortalClient:
                     "payload": body,
                 }
             body["object"] = subject
+            if recipient:
+                body["recipient"] = recipient
+            if cc:
+                body["cc"] = cc
         if followup_client_id:
             body["FollowUpClientId"] = followup_client_id
         if extended_parameters:

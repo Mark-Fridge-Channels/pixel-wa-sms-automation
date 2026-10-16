@@ -259,8 +259,17 @@ class NotionClient:
             if gmail_thread_id not in {ext.get("gmailThreadId"), ext.get("gmail_thread_id")}:
                 continue
             task_ids = relation_ids(p.get("Follow-up Task"))
-            if task_ids:
-                hits.append({"conversation_id": page.get("id"), "task_id": task_ids[0]})
+            if not task_ids:
+                continue
+            contact_ids = relation_ids(p.get("Follow-up Contact"))
+            hits.append(
+                {
+                    "conversation_id": page.get("id"),
+                    "task_id": task_ids[0],
+                    "thread_id": rich_text_plain(p.get("Thread ID")) or None,
+                    "contact_page_id": contact_ids[0] if contact_ids else None,
+                }
+            )
         by_task = {h["task_id"]: h for h in hits}
         return next(iter(by_task.values())) if len(by_task) == 1 else None
 
