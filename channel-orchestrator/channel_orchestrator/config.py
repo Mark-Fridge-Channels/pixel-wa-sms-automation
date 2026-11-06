@@ -106,6 +106,8 @@ class Settings(BaseSettings):
         "https://amzn-s3-fc-bucket.s3.sa-east-1.amazonaws.com/"
         "images/hommio-email-signature-logo.png"
     )
+    # Temporary rebrand line under the title; set empty to hide after transition.
+    email_signature_rebrand_note: str = "FridgeChannels is now Hommio"
 
     data_dir: str = ""
 

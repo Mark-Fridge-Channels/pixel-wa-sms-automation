@@ -22,6 +22,10 @@ def signature_logo_url() -> str:
     return url or DEFAULT_LOGO_URL
 
 
+def signature_rebrand_note() -> str:
+    return (getattr(settings, "email_signature_rebrand_note", "") or "").strip()
+
+
 def signature_already_present(text: str | None) -> bool:
     value = text or ""
     return SIGNATURE_MARK in value or "hommio-email-signature-logo.png" in value
@@ -29,6 +33,17 @@ def signature_already_present(text: str | None) -> bool:
 
 def signature_html() -> str:
     logo = escape(signature_logo_url(), quote=True)
+    note = signature_rebrand_note()
+    # Keep the right column to ~3 lines: identity / pitch / note+site
+    footer_bits: list[str] = []
+    if note:
+        footer_bits.append(
+            f'<span style="color:#777777;">{escape(note)}</span>'
+        )
+    footer_bits.append(
+        '<a href="https://hommio.ai" target="_blank" style="color:#111111;text-decoration:underline;">hommio.ai</a>'
+    )
+    footer = '&nbsp;·&nbsp;'.join(footer_bits)
     return f"""<table cellpadding="0" cellspacing="0" border="0" role="presentation" data-{SIGNATURE_MARK}="1" style="border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;color:#111111;">
   <tr>
     <td valign="middle" style="padding:0 18px 0 0;">
@@ -39,20 +54,19 @@ def signature_html() -> str:
     <td valign="middle" style="padding:0 0 0 18px;border-left:2px solid #111111;">
       <table cellpadding="0" cellspacing="0" border="0" role="presentation" style="border-collapse:collapse;">
         <tr>
-          <td style="font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:700;line-height:1.3;color:#111111;padding:0 0 2px 0;">Ella</td>
+          <td style="font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:700;line-height:1.35;color:#111111;padding:0 0 6px 0;">
+            Ella&nbsp;<span style="font-weight:400;color:#555555;">· Account Manager</span>
+          </td>
         </tr>
         <tr>
-          <td style="font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:400;line-height:1.4;color:#333333;padding:0 0 10px 0;">Account Manager</td>
+          <td style="font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.45;color:#333333;padding:0 0 8px 0;">
+            <span style="font-weight:700;font-style:italic;color:#111111;">Retention is at home</span><br>
+            <span style="font-size:12px;color:#666666;">In-home retention solution for CPG brands.</span>
+          </td>
         </tr>
         <tr>
-          <td style="font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;line-height:1.4;color:#111111;padding:0 0 2px 0;font-style:italic;">Retention is at home</td>
-        </tr>
-        <tr>
-          <td style="font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:400;line-height:1.45;color:#555555;padding:0 0 10px 0;">In-home retention solution for CPG brands.</td>
-        </tr>
-        <tr>
-          <td style="font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.4;padding:0;">
-            <a href="https://hommio.ai" target="_blank" style="color:#111111;text-decoration:underline;">hommio.ai</a>
+          <td style="font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:1.4;color:#777777;padding:0;">
+            {footer}
           </td>
         </tr>
       </table>
@@ -62,13 +76,17 @@ def signature_html() -> str:
 
 
 def signature_plain() -> str:
-    return (
-        "Ella\n"
-        "Account Manager\n"
-        "Retention is at home\n"
-        "In-home retention solution for CPG brands.\n"
-        "https://hommio.ai"
-    )
+    lines = [
+        "Ella · Account Manager",
+        "Retention is at home",
+        "In-home retention solution for CPG brands.",
+    ]
+    note = signature_rebrand_note()
+    if note:
+        lines.append(f"{note} · https://hommio.ai")
+    else:
+        lines.append("https://hommio.ai")
+    return "\n".join(lines)
 
 
 def append_signature_html(html_core: str) -> str:

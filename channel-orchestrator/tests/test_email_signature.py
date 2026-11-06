@@ -19,14 +19,26 @@ LOGO = (
 )
 
 
-def test_signature_html_contains_brand_copy():
+def test_signature_html_contains_brand_copy(monkeypatch):
+    monkeypatch.setattr(settings, "email_signature_rebrand_note", "FridgeChannels is now Hommio")
     html = signature_html()
     assert "hommio-email-signature" in html
     assert "Ella" in html
     assert "Account Manager" in html
+    assert "FridgeChannels is now Hommio" in html
     assert "Retention is at home" in html
     assert "hommio.ai" in html
     assert LOGO in html
+    # Compact layout: identity / pitch / footer (not six stacked rows).
+    assert html.count("<tr>") <= 5
+
+
+def test_signature_rebrand_note_can_hide(monkeypatch):
+    monkeypatch.setattr(settings, "email_signature_rebrand_note", "")
+    html = signature_html()
+    assert "FridgeChannels is now Hommio" not in html
+    assert "Account Manager" in html
+    assert "hommio.ai" in html
 
 
 def test_append_signature_idempotent():
