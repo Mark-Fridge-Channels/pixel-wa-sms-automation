@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     # HTTPS hosts allowed to keep a remote /api/track/open/ pixel. Not downloaded.
     # "*." matches one subdomain suffix, e.g. *.trycloudflare.com
     email_tracking_img_hosts: str = "*.trycloudflare.com"
+    # Append Hommio HTML signature at Gmail send (after body sanitize).
+    email_signature_enabled: bool = True
+    email_signature_logo_url: str = (
+        "https://amzn-s3-fc-bucket.s3.sa-east-1.amazonaws.com/"
+        "images/hommio-email-signature-logo.png"
+    )
 
     data_dir: str = ""
 

@@ -88,6 +88,7 @@ def test_is_allowed_s3_media_url(monkeypatch):
 
 
 def test_send_message_plain_legacy(monkeypatch):
+    monkeypatch.setattr(settings, "email_signature_enabled", False)
     client = GmailClient()
     captured: dict = {}
 
@@ -106,6 +107,7 @@ def test_send_message_plain_legacy(monkeypatch):
 
 
 def test_send_message_html_with_cid(monkeypatch):
+    monkeypatch.setattr(settings, "email_signature_enabled", False)
     monkeypatch.setattr(settings, "s3_bucket", "bucket")
     monkeypatch.setattr(settings, "aws_region", "us-east-1")
     monkeypatch.setattr(settings, "s3_public_base_url", "")
@@ -158,6 +160,7 @@ def test_send_message_html_with_cid(monkeypatch):
 
 
 def test_send_message_keeps_tracking_pixel_remote(monkeypatch):
+    monkeypatch.setattr(settings, "email_signature_enabled", False)
     monkeypatch.setattr(settings, "s3_bucket", "bucket")
     monkeypatch.setattr(settings, "aws_region", "us-east-1")
     monkeypatch.setattr(settings, "s3_public_base_url", "")

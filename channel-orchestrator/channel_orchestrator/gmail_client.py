@@ -25,6 +25,11 @@ from .email_html import (
     sanitize_email_html,
     is_allowed_tracking_pixel_url,
 )
+from .email_signature import (
+    append_signature_html,
+    plain_body_to_html,
+    signature_enabled,
+)
 from .s3_media import is_allowed_s3_media_url
 
 
@@ -141,11 +146,23 @@ class GmailClient:
 
         html_body: str | None = None
         related: list[dict[str, Any]] = []
-        if looks_like_html(body or ""):
-            sanitized = sanitize_email_html(body or "", _allow_outbound_image)
-            if sanitized:
-                html_body, related = self._cid_inline_images(sanitized)
-                msg.set_content(html_to_plain_text(html_body) or " ")
+        raw_body = body or ""
+        # Signature is trusted first-party HTML — append after sanitize so table/style survive.
+        if looks_like_html(raw_body):
+            core = sanitize_email_html(raw_body, _allow_outbound_image)
+        elif signature_enabled() and raw_body.strip():
+            core = plain_body_to_html(raw_body)
+        elif signature_enabled():
+            core = ""
+        else:
+            core = None
+
+        if core is not None:
+            prepared = append_signature_html(core)
+            if prepared:
+                html_body, related = self._cid_inline_images(prepared)
+                plain = html_to_plain_text(html_body) or " "
+                msg.set_content(plain)
                 msg.add_alternative(html_body, subtype="html")
                 html_part = _html_part(msg)
                 for item in related:
@@ -159,9 +176,9 @@ class GmailClient:
                         disposition="inline",
                     )
             else:
-                msg.set_content(body or "")
+                msg.set_content(raw_body)
         else:
-            msg.set_content(body or "")
+            msg.set_content(raw_body)
 
         for att in attachments or []:
             data = att.get("bytes") or att.get("data") or b""
