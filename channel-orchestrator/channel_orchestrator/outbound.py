@@ -623,6 +623,8 @@ def execute_task(
     force: bool = False,
 ) -> dict[str, Any]:
     """Execute one Notion task without daily_plan JSON (scan/queue path)."""
+    from .after_email_followup import dependency_block_reason, should_cancel_for_failed_email
+
     notion = notion or NotionClient()
     status = notion.get_task_status(task_id)
     if status != "Pending":
@@ -632,6 +634,22 @@ def execute_task(
 
     resolved = notion.resolve_task_for_send(task_id)
     ch = normalize_channel(channel or resolved.channel or "SMS")
+
+    dep = dependency_block_reason(notion, resolved.extended_parameters)
+    if dep:
+        if should_cancel_for_failed_email(dep) and not dry_run:
+            notes = f"Cancelled: linked email task did not succeed ({dep})."
+            notion.update_task_status(task_id, "Cancelled", notes=notes)
+            record_attempt(task_id, channel=ch, outcome="cancelled", detail=notes)
+            return {
+                "ok": True,
+                "status": "cancelled",
+                "reason": notes,
+                "task_id": task_id,
+                "channel": ch,
+            }
+        record_attempt(task_id, channel=ch, outcome="skipped", detail=dep)
+        return {"ok": True, "status": "skipped", "reason": dep, "task_id": task_id, "channel": ch}
 
     blocked = retry_blocked_reason(
         notion=notion,
