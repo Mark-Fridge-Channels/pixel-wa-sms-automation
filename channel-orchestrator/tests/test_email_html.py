@@ -74,6 +74,21 @@ def test_tracking_pixel_allowlist(monkeypatch):
     ) is False
 
 
+def test_sanitize_keeps_editor_image_width():
+    html = sanitize_email_html(f'<img src="{S3}" width="320" height="99" style="width:999px">', _allow)
+    assert 'width="320" style="width:320px;max-width:100%;height:auto"' in html
+    assert "height=" not in html
+    assert 'width="1200"' in sanitize_email_html(f'<img src="{S3}" width="9000">', _allow)
+    assert "width=" not in sanitize_email_html(f'<img src="{S3}" width="abc">', _allow)
+
+
+def test_sanitize_keeps_gmail_blank_lines():
+    body = "<div>Hi Alex,</div><div><br /></div><div><br /></div><div>A &amp; B&nbsp;&nbsp;x</div>"
+    html = sanitize_email_html(body, _allow)
+    assert html.startswith("<div>Hi Alex,</div><div><br /></div><div><br /></div>")
+    assert "A &amp; B\xa0\xa0x" in html
+
+
 def test_html_to_plain_text():
     assert html_to_plain_text("<p>Hi <strong>Alex</strong></p><p>Next</p>") == "Hi Alex\nNext"
 
@@ -145,12 +160,20 @@ def test_send_message_html_with_cid(monkeypatch):
     client.send_message(
         to="a@b.com",
         subject="Catalog",
-        body=f'<p>Hi</p><img src="{S3}" alt="catalog">',
+        body=f'<p>Hi</p><img src="{S3}" alt="catalog" width="320">',
     )
     import base64
+    from email import message_from_bytes
 
     raw = captured["json"]["raw"] + "=="
     decoded = base64.urlsafe_b64decode(raw).decode("utf-8", errors="replace")
+    sent_html = next(
+        part.get_payload(decode=True).decode("utf-8", errors="replace")
+        for part in message_from_bytes(base64.urlsafe_b64decode(raw)).walk()
+        if part.get_content_type() == "text/html"
+    )
+    assert 'src="cid:img1"' in sent_html
+    assert 'width="320"' in sent_html
     assert "text/html" in decoded.lower()
     assert "cid:img1" in decoded
     assert "Content-ID:" in decoded or "content-id:" in decoded.lower()

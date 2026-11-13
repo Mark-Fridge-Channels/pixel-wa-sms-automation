@@ -25,6 +25,7 @@ from .email_html import (
     sanitize_email_html,
     is_allowed_tracking_pixel_url,
 )
+from .email_quote import ReplyQuote, build_reply_quote
 from .email_signature import (
     append_signature_html,
     plain_body_to_html,
@@ -130,6 +131,7 @@ class GmailClient:
         references: str | None = None,
         cc: list[str] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        quote: ReplyQuote | None = None,
     ) -> dict[str, Any]:
         msg = EmailMessage()
         msg["To"] = to
@@ -150,18 +152,21 @@ class GmailClient:
         # Signature is trusted first-party HTML — append after sanitize so table/style survive.
         if looks_like_html(raw_body):
             core = sanitize_email_html(raw_body, _allow_outbound_image)
-        elif signature_enabled() and raw_body.strip():
-            core = plain_body_to_html(raw_body)
-        elif signature_enabled():
-            core = ""
+        elif signature_enabled() or quote is not None:
+            core = plain_body_to_html(raw_body) if raw_body.strip() else ""
         else:
             core = None
 
         if core is not None:
             prepared = append_signature_html(core)
-            if prepared:
+            if prepared or quote is not None:
                 html_body, related = self._cid_inline_images(prepared)
-                plain = html_to_plain_text(html_body) or " "
+                plain = html_to_plain_text(html_body)
+                if quote is not None:
+                    html_body = f"{html_body}{quote.html}"
+                    related = related + quote.related
+                    plain = f"{plain}\n\n{quote.plain}" if plain else quote.plain
+                plain = plain or " "
                 msg.set_content(plain)
                 msg.add_alternative(html_body, subtype="html")
                 html_part = _html_part(msg)
@@ -253,7 +258,7 @@ class GmailClient:
 
     def latest_message_headers(self, thread_id: str) -> dict[str, str]:
         thread = self.get_thread(thread_id)
-        messages = thread.get("messages") or []
+        messages = [m for m in thread.get("messages") or [] if "DRAFT" not in (m.get("labelIds") or [])]
         if not messages:
             return {}
         last = messages[-1]
@@ -284,10 +289,16 @@ class GmailClient:
         gmail_thread_id: str | None = None,
         cc: list[str] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        quote_history: bool = True,
     ) -> dict[str, Any]:
-        """New thread if no gmail_thread_id; else reply in thread (To + optional Cc, not Reply-All)."""
+        """New thread if no gmail_thread_id; else reply in thread (To + optional Cc, not Reply-All).
+
+        Thread replies quote the latest message like Gmail's Reply unless quote_history is False.
+        """
         in_reply_to = None
         references = None
+        quote: ReplyQuote | None = None
+        quote_warning: str | None = None
         subj = subject or "(no subject)"
         if gmail_thread_id:
             hdrs = self.latest_message_headers(gmail_thread_id)
@@ -298,6 +309,14 @@ class GmailClient:
                 subj = prior if prior.lower().startswith("re:") else f"Re: {prior or '(no subject)'}"
             elif not subject.lower().startswith("re:"):
                 subj = f"Re: {subject}"
+            quoted_id = hdrs.get("gmail_message_id")
+            if quote_history and quoted_id:
+                try:
+                    quote = self.reply_quote(quoted_id)
+                except Exception as exc:  # noqa: BLE001
+                    # A missing quote must never block the reply itself.
+                    log.warning("reply quote failed thread=%s message=%s: %s", gmail_thread_id, quoted_id, exc)
+                    quote_warning = f"未能附带原邮件引用：{exc}"
         sent = self.send_message(
             to=to,
             subject=subj,
@@ -307,12 +326,24 @@ class GmailClient:
             references=references,
             cc=cc,
             attachments=attachments,
+            quote=quote,
         )
         return {
             "gmail_message_id": sent.get("id"),
             "gmail_thread_id": sent.get("threadId") or gmail_thread_id,
+            "quoted": quote is not None,
+            "quote_warning": quote_warning,
             "raw": sent,
         }
+
+    def reply_quote(self, message_id: str) -> ReplyQuote | None:
+        message = self.get_message(message_id, format="full")
+        return build_reply_quote(
+            message,
+            lambda attachment_id: self.download_attachment(message_id, attachment_id),
+            tz_name=settings.timezone,
+            max_inline_bytes=int(settings.email_attachment_max_bytes),
+        )
 
     # --- history poll ---
 

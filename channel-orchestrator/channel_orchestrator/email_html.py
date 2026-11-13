@@ -125,6 +125,18 @@ def is_safe_href(url: str) -> bool:
     return lower.startswith("https://") or lower.startswith("mailto:")
 
 
+MAX_IMAGE_WIDTH = 1200
+
+
+def _image_width(raw: str) -> int | None:
+    """Editor-chosen image width in px, capped the same as the Portal sanitizer."""
+    match = re.match(r"\s*(\d+)", raw or "")
+    if not match:
+        return None
+    width = int(match.group(1))
+    return min(width, MAX_IMAGE_WIDTH) if width > 0 else None
+
+
 class _Sanitizer(HTMLParser):
     def __init__(self, allow_image_url: Callable[[str], bool]) -> None:
         super().__init__(convert_charrefs=True)
@@ -191,7 +203,12 @@ class _Sanitizer(HTMLParser):
             alt = mapping.get("alt", "").strip()
             if alt:
                 kept.append(f'alt="{escape(alt, quote=True)}"')
-            kept.append('style="max-width:100%;height:auto"')
+            width = _image_width(mapping.get("width", ""))
+            if width:
+                kept.append(f'width="{width}"')
+                kept.append(f'style="width:{width}px;max-width:100%;height:auto"')
+            else:
+                kept.append('style="max-width:100%;height:auto"')
         elif tag == "a":
             href = mapping.get("href", "").strip()
             if href and is_safe_href(href):

@@ -565,6 +565,41 @@ def test_email_outbound_reply_in_thread(tmp_path, monkeypatch):
     result = execute_resolved_email(resolved, notion=notion, gmail=gmail, cache=cache)
     assert result["ok"] is True
     assert gmail.send_new_or_reply.call_args.kwargs["gmail_thread_id"] == "gt-existing"
+    assert gmail.send_new_or_reply.call_args.kwargs["quote_history"] is True
+
+
+def test_email_outbound_reply_without_quote_when_portal_removed_it(tmp_path, monkeypatch):
+    from channel_orchestrator.outbound import execute_resolved_email
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    notion = MagicMock()
+    gmail = MagicMock()
+    gmail.send_new_or_reply.return_value = {
+        "gmail_thread_id": "gt-existing",
+        "gmail_message_id": "gm-3",
+        "quote_warning": None,
+    }
+    cache = OutboundCache(channel="EMAIL", path=tmp_path / "email_cache.json")
+    resolved = ResolvedTask(
+        task_id="task-e3",
+        title="Follow",
+        priority="P0",
+        scheduled_at="2026-09-15",
+        status="Pending",
+        contact_id="c1",
+        keyperson_id="k1",
+        phone_e164=None,
+        conversation_id="conv-e3",
+        content="Short reply",
+        thread_id="THR-e3-Email",
+        channel="EMAIL",
+        email="prospect@example.com",
+        subject="Follow",
+        extended_parameters={"gmailThreadId": "gt-existing", "quoteHistory": False},
+    )
+    result = execute_resolved_email(resolved, notion=notion, gmail=gmail, cache=cache)
+    assert result["ok"] is True
+    assert gmail.send_new_or_reply.call_args.kwargs["quote_history"] is False
 
 
 def test_email_inbound_matches_gmail_thread(tmp_path, monkeypatch):

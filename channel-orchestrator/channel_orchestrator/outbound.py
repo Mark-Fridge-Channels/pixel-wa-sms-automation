@@ -461,6 +461,8 @@ def execute_resolved_email(
         (resolved.extended_parameters or {}).get("gmailThreadId")
         or (resolved.extended_parameters or {}).get("gmail_thread_id")
     )
+    # Portal writes quoteHistory=false when the user deleted the quoted text in the composer.
+    quote_history = (resolved.extended_parameters or {}).get("quoteHistory") is not False
     thread_bounce = suppression.entry_for_thread(gmail_thread_id)
     if thread_bounce and thread_bounce.get("email") != normalize_email(resolved.email):
         # The corrected recipient never got the bounced thread; replying in it would quote a DSN.
@@ -475,6 +477,7 @@ def execute_resolved_email(
             "email": resolved.email,
             "thread_id": resolved.thread_id,
             "gmail_thread_id": gmail_thread_id,
+            "quote_history": bool(gmail_thread_id) and quote_history,
             "subject": subject,
             "content": resolved.content,
             "cc": cc,
@@ -515,6 +518,7 @@ def execute_resolved_email(
             gmail_thread_id=gmail_thread_id,
             cc=cc or None,
             attachments=file_parts or None,
+            quote_history=quote_history,
         )
     except Exception as e:  # noqa: BLE001
         msg = f"Email 发送失败：{e}"
@@ -534,9 +538,12 @@ def execute_resolved_email(
     sent_at = datetime.now(timezone.utc)
     gtid = sent.get("gmail_thread_id")
     gmid = sent.get("gmail_message_id")
-    notes = None
+    note_parts: list[str] = []
     if warnings:
-        notes = "附件提示：" + "；".join(warnings)
+        note_parts.append("附件提示：" + "；".join(warnings))
+    if sent.get("quote_warning"):
+        note_parts.append(str(sent["quote_warning"]))
+    notes = "；".join(note_parts) or None
     notion.update_task_status(resolved.task_id, "Completed", ended_at=sent_at, notes=notes)
     notion.update_conversation_outbound(
         resolved.conversation_id,
